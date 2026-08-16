@@ -1,23 +1,62 @@
 import "./style.css"
 import * as THREE from "three"
-import { OrbitControls } from "three/addons/controls/OrbitControls.js"
 import { badgeTexture } from "./badge.ts"
 import { SPHERE_RADIUS, fibonacciSphere } from "./fibonacciSphere.ts"
-import { METHODS, OPTIMAL_MAX, orientedSpiral, reassign, type Assignment, type MethodId, type Metrics } from "./assign.ts"
+import { COUNT, orientedSpiral, reassign } from "./assign.ts"
+
+const sim = {
+  spring: 0.55,
+  damping: 0.45,
+  spin: 0.85,
+  alignSpring: 0.22,
+  alignDamping: 0.85,
+  alignMass: 1,
+}
+
+const tweakFields: { key: keyof typeof sim; label: string; min: number; max: number; step: number }[] = [
+  { key: "spring", label: "Spring", min: 0, max: 1.5, step: 0.05 },
+  { key: "damping", label: "Damping", min: 0.05, max: 1.4, step: 0.05 },
+  { key: "spin", label: "Spin", min: 0, max: 2, step: 0.05 },
+  { key: "alignSpring", label: "Align spring", min: 0, max: 1.5, step: 0.05 },
+  { key: "alignDamping", label: "Align damping", min: 0.05, max: 1.4, step: 0.05 },
+  { key: "alignMass", label: "Align mass", min: 0.2, max: 4, step: 0.1 },
+]
+
+const CROSSHAIR_PX = 14
 
 const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!
-const slider = document.querySelector<HTMLInputElement>("#count")!
-const value = document.querySelector<HTMLOutputElement>("#count-value")!
-const rotationSlider = document.querySelector<HTMLInputElement>("#rotation")!
-const rotationValue = document.querySelector<HTMLOutputElement>("#rotation-value")!
-const centerLine = document.querySelector<HTMLDivElement>("#center-line")!
-const methodsBody = document.querySelector<HTMLTableSectionElement>("#methods-body")!
-const methodHint = document.querySelector<HTMLParagraphElement>("#method-hint")!
-const twistSlider = document.querySelector<HTMLInputElement>("#twist")!
-const twistValue = document.querySelector<HTMLOutputElement>("#twist-value")!
-const autoTwist = document.querySelector<HTMLInputElement>("#auto-twist")!
-const playButton = document.querySelector<HTMLButtonElement>("#play")!
-const resetButton = document.querySelector<HTMLButtonElement>("#reset")!
+const crosshair = document.querySelector<HTMLElement>(".crosshair")!
+const tweaks = document.querySelector<HTMLElement>("#tweaks")!
+
+let showSpiral = true
+
+const formatTweak = (value: number, step: number) => value.toFixed(step < 0.1 ? 2 : 1)
+
+const spiralToggle = document.createElement("label")
+spiralToggle.className = "toggle"
+const spiralCheck = document.createElement("input")
+spiralCheck.type = "checkbox"
+spiralCheck.checked = showSpiral
+spiralToggle.append(spiralCheck, Object.assign(document.createElement("span"), { textContent: "Show spiral" }))
+tweaks.append(spiralToggle)
+
+for (const field of tweakFields) {
+  const label = document.createElement("label")
+  const value = document.createElement("span")
+  value.textContent = formatTweak(sim[field.key], field.step)
+  const input = document.createElement("input")
+  input.type = "range"
+  input.min = String(field.min)
+  input.max = String(field.max)
+  input.step = String(field.step)
+  input.value = String(sim[field.key])
+  input.addEventListener("input", () => {
+    sim[field.key] = Number(input.value)
+    value.textContent = formatTweak(sim[field.key], field.step)
+  })
+  label.append(Object.assign(document.createElement("span"), { textContent: field.label }), value, input)
+  tweaks.append(label)
+}
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
@@ -28,91 +67,73 @@ scene.background = new THREE.Color(0x111111)
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100)
 camera.position.set(0, 0, 3.2)
 
-const controls = new OrbitControls(camera, canvas)
-controls.enableDamping = true
-controls.enablePan = false
-
 scene.add(new THREE.AmbientLight(0xffffff, 0.55))
 const light = new THREE.DirectionalLight(0xffffff, 0.9)
 light.position.set(2, 2, 3)
 scene.add(light)
 
-scene.add(
+const content = new THREE.Group()
+scene.add(content)
+
+content.add(
   new THREE.Mesh(
     new THREE.SphereGeometry(1, 48, 32),
     new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.85 }),
   ),
 )
 
-const content = new THREE.Group()
-scene.add(content)
-
 const markers = new THREE.Group()
 content.add(markers)
 
-const trailGeometry = new THREE.BufferGeometry()
-const trailMaterial = new THREE.LineBasicMaterial({
-  vertexColors: true,
-  transparent: true,
-  opacity: 0.85,
-  depthTest: false,
-  depthWrite: false,
-})
-const trails = new THREE.LineSegments(trailGeometry, trailMaterial)
-trails.frustumCulled = false
-trails.renderOrder = 1
-content.add(trails)
-
 const spiralGeometry = new THREE.BufferGeometry()
-const spiralMaterial = new THREE.LineBasicMaterial({
-  vertexColors: true,
-  transparent: true,
-  opacity: 0.95,
-  depthTest: false,
-  depthWrite: false,
-})
-const spiral = new THREE.Line(spiralGeometry, spiralMaterial)
+const spiral = new THREE.Line(
+  spiralGeometry,
+  new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    opacity: 0.95,
+    depthTest: false,
+    depthWrite: false,
+  }),
+)
 spiral.frustumCulled = false
 spiral.renderOrder = 2
-spiral.visible = false
 content.add(spiral)
 
-const poleVec = new THREE.Vector3()
+spiralCheck.addEventListener("change", () => {
+  showSpiral = spiralCheck.checked
+  spiral.visible = showSpiral
+})
 
-const pointer = new THREE.Vector2()
 const pickWorld = new THREE.Vector3()
-const fromVec = new THREE.Vector3()
-const toVec = new THREE.Vector3()
-const midVec = new THREE.Vector3()
+const seekVec = new THREE.Vector3()
+const axisVec = new THREE.Vector3()
+const forceVec = new THREE.Vector3()
+const velVec = new THREE.Vector3()
+const omega = new THREE.Vector3()
+const viewDir = new THREE.Vector3()
+const worldPole = new THREE.Vector3()
+const ndc = new THREE.Vector2()
+const prevHit = new THREE.Vector3()
+const currHit = new THREE.Vector3()
+const rotQ = new THREE.Quaternion()
+const alignQ = new THREE.Quaternion()
+const lastContentQ = new THREE.Quaternion()
+const invQ = new THREE.Quaternion()
+const alignVel = new THREE.Vector3()
 
-let count = 0
-let selectedMethod: MethodId = "squared"
-let center: number | null = null
-let snapshot: Float32Array | null = null
-let results = new Map<MethodId, Assignment>()
-let animation: {
-  from: Float32Array
-  to: Float32Array
-  start: number
-  duration: number
-} | null = null
+const velocity = new Float32Array(COUNT * 3)
+const seek = new Float32Array(COUNT * 3)
+let center = 0
+let twist = 0
+let aimed = -1
+let lastTime = performance.now()
 let pointerDown = { x: 0, y: 0 }
-let syncingTwist = false
-let compareTimer = 0
-
-const markerAt = (index: number) => {
-  const existing = markers.children[index] as THREE.Sprite | undefined
-  if (existing) return existing
-
-  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true }))
-  sprite.userData.index = index
-  markers.add(sprite)
-  return sprite
-}
+let dragging = false
 
 const readPositions = () => {
-  const positions = new Float32Array(count * 3)
-  for (let i = 0; i < count; i++) {
+  const positions = new Float32Array(COUNT * 3)
+  for (let i = 0; i < COUNT; i++) {
     const p = (markers.children[i] as THREE.Sprite).position
     positions[i * 3] = p.x
     positions[i * 3 + 1] = p.y
@@ -121,84 +142,26 @@ const readPositions = () => {
   return positions
 }
 
-const writePositions = (positions: Float32Array) => {
-  for (let i = 0; i < count; i++) {
-    ;(markers.children[i] as THREE.Sprite).position.set(
-      positions[i * 3],
-      positions[i * 3 + 1],
-      positions[i * 3 + 2],
-    )
-  }
+const setSeek = (index: number) => {
+  const assignment = reassign(readPositions(), COUNT, index, SPHERE_RADIUS)
+  seek.set(assignment.targets)
+  twist = assignment.twist
+  center = index
+  highlightMarkers()
 }
 
-const slerpOnSphere = (from: THREE.Vector3, to: THREE.Vector3, t: number, out: THREE.Vector3) => {
-  const d = Math.min(1, Math.max(-1, from.dot(to) / (from.length() * to.length())))
-  const w = Math.acos(d)
-  if (w < 1e-5) return out.copy(from).lerp(to, t).setLength(SPHERE_RADIUS)
-  const s = Math.sin(w)
-  out.copy(from).multiplyScalar(Math.sin((1 - t) * w) / s)
-  out.addScaledVector(to, Math.sin(t * w) / s)
-  return out.setLength(SPHERE_RADIUS)
+const highlightMarkers = () => {
+  for (let i = 0; i < COUNT; i++) {
+    const marker = markers.children[i] as THREE.Sprite
+    marker.material.color.set(i === center ? 0xffc14d : i === aimed ? 0x9ad1ff : 0xffffff)
+  }
+  crosshair.classList.toggle("is-hot", aimed >= 0 && aimed !== center)
 }
 
-const TRAIL_SEGMENTS = 14
-const TRAIL_CAP = 180
-
-const setTrails = (from: Float32Array, to: Float32Array) => {
-  const moves: { i: number; deg: number }[] = []
-  for (let i = 0; i < count; i++) {
-    fromVec.set(from[i * 3], from[i * 3 + 1], from[i * 3 + 2])
-    toVec.set(to[i * 3], to[i * 3 + 1], to[i * 3 + 2])
-    const deg = THREE.MathUtils.radToDeg(fromVec.angleTo(toVec))
-    if (deg > 0.15) moves.push({ i, deg })
-  }
-  moves.sort((a, b) => b.deg - a.deg)
-  const shown = moves.slice(0, TRAIL_CAP)
-  const maxDeg = shown[0]?.deg ?? 1
-
-  const verts = new Float32Array(shown.length * TRAIL_SEGMENTS * 2 * 3)
-  const colors = new Float32Array(shown.length * TRAIL_SEGMENTS * 2 * 3)
-  let w = 0
-
-  for (const move of shown) {
-    fromVec.set(from[move.i * 3], from[move.i * 3 + 1], from[move.i * 3 + 2])
-    toVec.set(to[move.i * 3], to[move.i * 3 + 1], to[move.i * 3 + 2])
-    const weight = 0.22 + 0.78 * (move.deg / maxDeg)
-    for (let s = 0; s < TRAIL_SEGMENTS; s++) {
-      slerpOnSphere(fromVec, toVec, s / TRAIL_SEGMENTS, midVec)
-      verts[w] = midVec.x
-      verts[w + 1] = midVec.y
-      verts[w + 2] = midVec.z
-      slerpOnSphere(fromVec, toVec, (s + 1) / TRAIL_SEGMENTS, midVec)
-      verts[w + 3] = midVec.x
-      verts[w + 4] = midVec.y
-      verts[w + 5] = midVec.z
-      const c0 = 0.25 + 0.75 * weight * (s / TRAIL_SEGMENTS)
-      const c1 = 0.25 + 0.75 * weight * ((s + 1) / TRAIL_SEGMENTS)
-      colors[w] = colors[w + 1] = colors[w + 2] = c0
-      colors[w + 3] = colors[w + 4] = colors[w + 5] = c1
-      w += 6
-    }
-  }
-
-  trailGeometry.setAttribute("position", new THREE.BufferAttribute(verts, 3))
-  trailGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3))
-  trailGeometry.computeBoundingSphere()
-}
-
-const clearTrails = () => {
-  trailGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(0), 3))
-  trailGeometry.setAttribute("color", new THREE.BufferAttribute(new Float32Array(0), 3))
-}
-
-const setSpiral = (twistRad: number) => {
-  if (center === null || !snapshot || count < 2) {
-    spiral.visible = false
-    return
-  }
-
-  poleVec.set(snapshot[center * 3], snapshot[center * 3 + 1], snapshot[center * 3 + 2])
-  const curve = orientedSpiral(count, SPHERE_RADIUS, poleVec, twistRad)
+const setSpiral = () => {
+  if (!showSpiral) return
+  const pole = (markers.children[center] as THREE.Sprite).position
+  const curve = orientedSpiral(COUNT, SPHERE_RADIUS, pole, twist)
   const points = curve.length / 3
   const colors = new Float32Array(points * 3)
   for (let i = 0; i < points; i++) {
@@ -207,258 +170,121 @@ const setSpiral = (twistRad: number) => {
     colors[i * 3 + 1] = 0.757 * fade
     colors[i * 3 + 2] = 0.302 * fade
   }
-
   spiralGeometry.setAttribute("position", new THREE.BufferAttribute(curve, 3))
   spiralGeometry.setAttribute("color", new THREE.BufferAttribute(colors, 3))
   spiralGeometry.computeBoundingSphere()
-  spiral.visible = true
 }
 
-const clearSpiral = () => {
-  spiral.visible = false
-}
-
-const highlightCenter = () => {
-  for (let i = 0; i < count; i++) {
-    const marker = markers.children[i] as THREE.Sprite
-    marker.material.color.set(i === center ? 0xffc14d : 0xffffff)
-  }
-}
-
-const fmtDeg = (deg: number) => `${deg < 10 ? deg.toFixed(1) : Math.round(deg)}°`
-
-const paintMethods = () => {
-  for (const row of Array.from(methodsBody.querySelectorAll("tr"))) {
-    const id = row.dataset.method as MethodId
-    const blocked = METHODS.find((m) => m.id === id)?.heavy && count > OPTIMAL_MAX
-    row.classList.toggle("active", id === selectedMethod)
-    row.classList.toggle("disabled", Boolean(blocked))
-    const assignment = results.get(id)
-    const cells = row.querySelectorAll("td")
-    if (blocked) {
-      cells[1].textContent = "—"
-      cells[2].textContent = "—"
-      cells[3].textContent = `>${OPTIMAL_MAX}`
-    } else if (assignment) {
-      cells[1].textContent = fmtDeg(assignment.metrics.meanDeg)
-      cells[2].textContent = fmtDeg(assignment.metrics.maxDeg)
-      cells[3].textContent = String(assignment.metrics.crossings)
-    } else if (center !== null && METHODS.find((m) => m.id === id)?.heavy) {
-      cells[1].textContent = "…"
-      cells[2].textContent = "…"
-      cells[3].textContent = "…"
-    } else {
-      cells[1].textContent = "—"
-      cells[2].textContent = "—"
-      cells[3].textContent = "—"
-    }
-  }
-  methodHint.textContent = METHODS.find((m) => m.id === selectedMethod)?.hint ?? ""
-}
-
-const showTwist = (metrics?: Metrics) => {
-  if (!metrics) {
-    twistValue.value = autoTwist.checked ? "auto" : `${twistSlider.value}°`
-    return
-  }
-  syncingTwist = true
-  twistSlider.value = String(Math.round(metrics.twistDeg))
-  syncingTwist = false
-  twistValue.value = autoTwist.checked ? `${Math.round(metrics.twistDeg)}° auto` : `${Math.round(metrics.twistDeg)}°`
-}
-
-const twistOverride = () =>
-  autoTwist.checked ? undefined : THREE.MathUtils.degToRad(twistSlider.valueAsNumber)
-
-const compute = (method: MethodId) => {
-  if (!snapshot || center === null) return
-  if (METHODS.find((m) => m.id === method)?.heavy && count > OPTIMAL_MAX) return
-  results.set(
-    method,
-    reassign({
-      positions: snapshot,
-      count,
-      center,
-      method,
-      radius: SPHERE_RADIUS,
-      twist: twistOverride(),
-    }),
+const pointerNdc = (event: PointerEvent) => {
+  const rect = canvas.getBoundingClientRect()
+  ndc.set(
+    ((event.clientX - rect.left) / rect.width) * 2 - 1,
+    -((event.clientY - rect.top) / rect.height) * 2 + 1,
   )
+  return ndc
 }
 
-const playAssignment = (assignment: Assignment) => {
-  const from = snapshot ?? readPositions()
-  writePositions(from)
-  setTrails(from, assignment.targets)
-  setSpiral(THREE.MathUtils.degToRad(assignment.metrics.twistDeg))
-  showTwist(assignment.metrics)
-  animation = {
-    from,
-    to: assignment.targets,
-    start: performance.now(),
-    duration: 1100,
+const ndcToBall = (x: number, y: number, out: THREE.Vector3) => {
+  const d = x * x + y * y
+  if (d > 1) {
+    const inv = 1 / Math.sqrt(d)
+    return out.set(x * inv, y * inv, 0)
   }
-  playButton.disabled = false
+  return out.set(x, y, Math.sqrt(1 - d))
 }
 
-const currentAssignment = () =>
-  results.get(selectedMethod) ?? results.get("greedy") ?? results.get("polar")
+const readContentDelta = () => {
+  invQ.copy(lastContentQ).invert()
+  rotQ.copy(content.quaternion).multiply(invQ)
+  lastContentQ.copy(content.quaternion)
+  const ang = 2 * Math.acos(Math.min(1, Math.max(-1, rotQ.w)))
+  omega.set(rotQ.x, rotQ.y, rotQ.z)
+  return ang
+}
 
-const applySelected = (animate: boolean) => {
-  const assignment = currentAssignment()
-  if (!assignment) return
-  if (animate) playAssignment(assignment)
-  else {
-    writePositions(assignment.targets)
-    setTrails(snapshot ?? assignment.targets, assignment.targets)
-    setSpiral(THREE.MathUtils.degToRad(assignment.metrics.twistDeg))
-    showTwist(assignment.metrics)
-    animation = null
-    playButton.disabled = false
+const kickPointsFromSpin = (ang: number) => {
+  if (sim.spin <= 0 || ang < 1e-5 || omega.lengthSq() < 1e-12) return
+  forceVec.copy(omega).setLength(ang * sim.spin)
+  forceVec.applyQuaternion(invQ.copy(content.quaternion).invert())
+  for (let i = 0; i < COUNT; i++) {
+    const pos = (markers.children[i] as THREE.Sprite).position
+    velVec.crossVectors(forceVec, pos)
+    velocity[i * 3] += velVec.x
+    velocity[i * 3 + 1] += velVec.y
+    velocity[i * 3 + 2] += velVec.z
   }
 }
 
-const fillCompare = (priority: MethodId) => {
-  results.clear()
-  for (const method of METHODS) {
-    if (method.heavy) continue
-    compute(method.id)
+const applySphereSpin = (dt: number) => {
+  const step = alignVel.length() * dt
+  if (step > 1e-8) {
+    alignQ.setFromAxisAngle(axisVec.copy(alignVel).normalize(), step)
+    content.quaternion.premultiply(alignQ)
   }
-  compute(priority)
-  paintMethods()
-  applySelected(true)
+  lastContentQ.copy(content.quaternion)
+}
 
-  window.clearTimeout(compareTimer)
-  compareTimer = window.setTimeout(() => {
-    for (const method of METHODS) {
-      if (!method.heavy || results.has(method.id)) continue
-      compute(method.id)
+const autoAlign = (dt: number) => {
+  const k = sim.alignSpring * 12
+  if (k > 0) {
+    const mass = Math.max(0.05, sim.alignMass)
+    const c = 2 * sim.alignDamping * Math.sqrt(k * mass)
+    worldPole.copy((markers.children[center] as THREE.Sprite).position).normalize()
+    worldPole.applyQuaternion(content.quaternion)
+    viewDir.copy(camera.position).normalize()
+    rotQ.setFromUnitVectors(worldPole, viewDir)
+    const ang = 2 * Math.acos(Math.min(1, Math.max(-1, rotQ.w)))
+    if (ang > 1e-6) axisVec.set(rotQ.x, rotQ.y, rotQ.z).setLength(ang)
+    else axisVec.set(0, 0, 0)
+    forceVec.copy(axisVec).multiplyScalar(k).addScaledVector(alignVel, -c)
+    alignVel.addScaledVector(forceVec, dt / mass)
+  }
+  applySphereSpin(dt)
+}
+
+const stepPhysics = (dt: number) => {
+  const k = sim.spring * 36
+  const c = 2 * sim.damping * Math.sqrt(k)
+  const steps = Math.max(1, Math.ceil(dt / 0.008))
+  const h = dt / steps
+
+  for (let i = 0; i < COUNT; i++) {
+    const pos = (markers.children[i] as THREE.Sprite).position
+    seekVec.set(seek[i * 3], seek[i * 3 + 1], seek[i * 3 + 2])
+    velVec.set(velocity[i * 3], velocity[i * 3 + 1], velocity[i * 3 + 2])
+    for (let s = 0; s < steps; s++) {
+      axisVec.crossVectors(pos, seekVec)
+      if (axisVec.lengthSq() < 1e-12) velVec.multiplyScalar(Math.max(0, 1 - c * h))
+      else {
+        forceVec.crossVectors(axisVec, pos).setLength(pos.angleTo(seekVec) * k)
+        forceVec.addScaledVector(velVec, -c)
+        velVec.addScaledVector(forceVec, h)
+      }
+      velVec.addScaledVector(pos, -velVec.dot(pos) / pos.lengthSq())
+      pos.addScaledVector(velVec, h).setLength(SPHERE_RADIUS)
+      velVec.addScaledVector(pos, -velVec.dot(pos) / pos.lengthSq())
     }
-    paintMethods()
-  }, 30)
-}
-
-const selectCenter = (index: number) => {
-  animation = null
-  center = index
-  snapshot = readPositions()
-  centerLine.textContent = `${index + 1} is the new 1`
-  highlightCenter()
-  fillCompare(selectedMethod)
-}
-
-const layoutCanonical = (nextCount: number) => {
-  const positions = fibonacciSphere(nextCount, SPHERE_RADIUS)
-  const scale = Math.max(0.04, 0.34 / Math.sqrt(nextCount))
-
-  for (let i = 0; i < nextCount; i++) {
-    const marker = markerAt(i)
-    marker.material.map = badgeTexture(i + 1)
-    marker.material.needsUpdate = true
-    marker.material.color.set(0xffffff)
-    const slot = nextCount - 1 - i
-    marker.position.set(positions[slot * 3], positions[slot * 3 + 1], positions[slot * 3 + 2])
-    marker.scale.setScalar(scale)
-    marker.visible = true
-  }
-
-  for (let i = nextCount; i < markers.children.length; i++) {
-    markers.children[i].visible = false
+    velocity[i * 3] = velVec.x
+    velocity[i * 3 + 1] = velVec.y
+    velocity[i * 3 + 2] = velVec.z
   }
 }
 
-const setCount = (nextCount: number) => {
-  count = nextCount
-  center = null
-  snapshot = null
-  results.clear()
-  animation = null
-  layoutCanonical(nextCount)
-  clearTrails()
-  clearSpiral()
-  centerLine.textContent = "No center selected"
-  playButton.disabled = true
-  showTwist()
-  paintMethods()
-  value.value = String(nextCount)
-}
-
-const setRotation = (degrees: number) => {
-  content.rotation.y = THREE.MathUtils.degToRad(degrees)
-  rotationValue.value = `${degrees}°`
-}
-
-const reset = () => {
-  setCount(count)
-}
-
-for (const method of METHODS) {
-  const row = document.createElement("tr")
-  row.dataset.method = method.id
-  row.innerHTML = `<td>${method.label}</td><td>—</td><td>—</td><td>—</td>`
-  row.addEventListener("click", () => {
-    if (method.heavy && count > OPTIMAL_MAX) return
-    selectedMethod = method.id
-    paintMethods()
-    if (center === null) return
-    if (!results.has(method.id)) compute(method.id)
-    paintMethods()
-    applySelected(true)
-  })
-  methodsBody.append(row)
-}
-paintMethods()
-
-const resize = () => {
-  camera.aspect = innerWidth / innerHeight
-  camera.updateProjectionMatrix()
-  renderer.setSize(innerWidth, innerHeight, false)
-}
-
-slider.addEventListener("input", () => setCount(slider.valueAsNumber))
-rotationSlider.addEventListener("input", () => setRotation(rotationSlider.valueAsNumber))
-playButton.addEventListener("click", () => {
-  const assignment = currentAssignment()
-  if (assignment && snapshot) {
-    writePositions(snapshot)
-    playAssignment(assignment)
-  }
-})
-resetButton.addEventListener("click", reset)
-autoTwist.addEventListener("change", () => {
-  if (center === null) {
-    showTwist()
-    return
-  }
-  fillCompare(selectedMethod)
-})
-twistSlider.addEventListener("input", () => {
-  if (syncingTwist) return
-  autoTwist.checked = false
-  twistValue.value = `${twistSlider.value}°`
-  if (center === null || !snapshot) return
-  compute(selectedMethod)
-  paintMethods()
-  applySelected(false)
-})
-twistSlider.addEventListener("change", () => {
-  if (center === null) return
-  fillCompare(selectedMethod)
-})
-
-canvas.addEventListener("pointerdown", (event) => {
-  pointerDown = { x: event.clientX, y: event.clientY }
-})
-
-const pickIndex = (ndc: THREE.Vector2) => {
+const pickIndexAt = (sx: number, sy: number, radiusPx: number) => {
   let best = -1
-  let bestDist = 0.05
+  let bestDist = radiusPx
+  const w = canvas.clientWidth
+  const h = canvas.clientHeight
   content.updateWorldMatrix(true, true)
-  for (let i = 0; i < count; i++) {
+  for (let i = 0; i < COUNT; i++) {
     const marker = markers.children[i] as THREE.Sprite
-    if (!marker.visible) continue
-    pickWorld.copy(marker.position).applyMatrix4(content.matrixWorld).project(camera)
-    const dist = Math.hypot(pickWorld.x - ndc.x, pickWorld.y - ndc.y)
+    pickWorld.copy(marker.position).applyMatrix4(content.matrixWorld)
+    if (pickWorld.dot(camera.position) <= 0) continue
+    pickWorld.project(camera)
+    if (pickWorld.z < -1 || pickWorld.z > 1) continue
+    const x = (pickWorld.x * 0.5 + 0.5) * w
+    const y = (-pickWorld.y * 0.5 + 0.5) * h
+    const dist = Math.hypot(x - sx, y - sy)
     if (dist < bestDist) {
       bestDist = dist
       best = i
@@ -467,33 +293,103 @@ const pickIndex = (ndc: THREE.Vector2) => {
   return best
 }
 
+const nearestToCrosshair = () =>
+  pickIndexAt(canvas.clientWidth * 0.5, canvas.clientHeight * 0.5, Infinity)
+
+const layout = () => {
+  const slots = fibonacciSphere(COUNT, SPHERE_RADIUS)
+  const scale = Math.max(0.04, 0.34 / Math.sqrt(COUNT))
+  for (let i = 0; i < COUNT; i++) {
+    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true }))
+    sprite.userData.index = i
+    sprite.material.map = badgeTexture(i + 1)
+    sprite.material.needsUpdate = true
+    sprite.scale.setScalar(scale)
+    const slot = COUNT - 1 - i
+    sprite.position.set(slots[slot * 3], slots[slot * 3 + 1], slots[slot * 3 + 2])
+    markers.add(sprite)
+  }
+}
+
+const resize = () => {
+  camera.aspect = innerWidth / innerHeight
+  camera.updateProjectionMatrix()
+  renderer.setSize(innerWidth, innerHeight, false)
+}
+
+const rotateByPointer = (event: PointerEvent) => {
+  pointerNdc(event)
+  ndcToBall(ndc.x, ndc.y, currHit)
+  if (prevHit.dot(currHit) < 0.999999) {
+    rotQ.setFromUnitVectors(prevHit, currHit)
+    content.quaternion.premultiply(rotQ)
+  }
+  prevHit.copy(currHit)
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  pointerDown = { x: event.clientX, y: event.clientY }
+  dragging = true
+  pointerNdc(event)
+  ndcToBall(ndc.x, ndc.y, prevHit)
+  lastContentQ.copy(content.quaternion)
+  canvas.setPointerCapture(event.pointerId)
+})
+
+canvas.addEventListener("pointermove", (event) => {
+  if (!dragging) return
+  rotateByPointer(event)
+})
+
 canvas.addEventListener("pointerup", (event) => {
-  if (Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5) return
-  const rect = canvas.getBoundingClientRect()
-  pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1
-  pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1
-  const index = pickIndex(pointer)
-  if (index >= 0) selectCenter(index)
+  if (!dragging) return
+  dragging = false
+  const dragged = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5
+  const nearest = nearestToCrosshair()
+  if (nearest >= 0 && nearest !== center) setSeek(nearest)
+  else if (!dragged) {
+    const rect = canvas.getBoundingClientRect()
+    const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, CROSSHAIR_PX)
+    if (index >= 0) setSeek(index)
+  }
+})
+
+canvas.addEventListener("pointercancel", () => {
+  dragging = false
 })
 
 addEventListener("resize", resize)
 
 resize()
-setCount(slider.valueAsNumber)
-setRotation(rotationSlider.valueAsNumber)
+layout()
+seek.set(readPositions())
+lastContentQ.copy(content.quaternion)
+highlightMarkers()
+setSpiral()
 
 renderer.setAnimationLoop(() => {
-  if (animation) {
-    const t = Math.min(1, (performance.now() - animation.start) / animation.duration)
-    const e = t * t * (3 - 2 * t)
-    for (let i = 0; i < count; i++) {
-      fromVec.set(animation.from[i * 3], animation.from[i * 3 + 1], animation.from[i * 3 + 2])
-      toVec.set(animation.to[i * 3], animation.to[i * 3 + 1], animation.to[i * 3 + 2])
-      slerpOnSphere(fromVec, toVec, e, midVec)
-      ;(markers.children[i] as THREE.Sprite).position.copy(midVec)
-    }
-    if (t >= 1) animation = null
+  const now = performance.now()
+  const dt = Math.min(0.05, (now - lastTime) / 1000)
+  lastTime = now
+
+  const nextAimed = nearestToCrosshair()
+  if (nextAimed !== aimed) {
+    aimed = nextAimed
+    highlightMarkers()
   }
-  controls.update()
+
+  if (nextAimed >= 0 && nextAimed !== center) setSeek(nextAimed)
+
+  if (dragging) {
+    const ang = readContentDelta()
+    if (dt > 1e-5 && ang > 1e-6 && omega.lengthSq() > 1e-12) alignVel.copy(omega).setLength(ang / dt)
+    else alignVel.set(0, 0, 0)
+    kickPointsFromSpin(ang)
+  } else {
+    autoAlign(dt)
+  }
+
+  stepPhysics(dt)
+  setSpiral()
   renderer.render(scene, camera)
 })
