@@ -3,11 +3,15 @@ import * as THREE from "three"
 import { badgeTexture } from "./badge.ts"
 import {
   COUNT,
+  MAX_COUNT,
+  MIN_COUNT,
   SPHERE_RADIUS,
   SPIRAL_MAX_POINTS,
+  setCount,
   slotPoint,
   slotRange,
-  writeOrientedSpiral,
+  writeLatticePose,
+  writeSpiral,
   writeSlotTargets,
   writeSlotVelocities,
 } from "./lattice.ts"
@@ -39,6 +43,14 @@ const tweakFields: { key: keyof typeof sim; label: string; min: number; max: num
 
 const CROSSHAIR_PX = 14
 const PAN_ROTATE = 0.0024
+const PAN_HANDOFF_MS = 140
+const PAN_VEL_SMOOTH = 0.38
+const FOCUS_STABLE_MS = 160
+const FOCUS_ARRIVE_ANG = 0.12
+const FOCUS_ARRIVE_VEL = 0.45
+const ZOOM_LOCK_MS = 260
+const PAN_CLASSIFY_MS = 70
+const SPIRAL_ANIM_MS = 480
 
 const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!
 const crosshair = document.querySelector<HTMLElement>(".crosshair")!
@@ -55,6 +67,18 @@ spiralCheck.type = "checkbox"
 spiralCheck.checked = showSpiral
 spiralToggle.append(spiralCheck, Object.assign(document.createElement("span"), { textContent: "Show spiral" }))
 tweaks.append(spiralToggle)
+
+const pointsLabel = document.createElement("label")
+const pointsValue = document.createElement("span")
+pointsValue.textContent = String(COUNT)
+const pointsInput = document.createElement("input")
+pointsInput.type = "range"
+pointsInput.min = String(MIN_COUNT)
+pointsInput.max = String(MAX_COUNT)
+pointsInput.step = "1"
+pointsInput.value = String(COUNT)
+pointsLabel.append(Object.assign(document.createElement("span"), { textContent: "Points" }), pointsValue, pointsInput)
+tweaks.append(pointsLabel)
 
 for (const field of tweakFields) {
   const label = document.createElement("label")
@@ -119,7 +143,7 @@ spiralCheck.addEventListener("change", () => {
   showSpiral = spiralCheck.checked
   spiral.visible = showSpiral
   if (showSpiral) {
-    lastSpiralGrowth = Number.NaN
+    snapSpiral(poleDir, twist)
     setSpiral()
   }
 })
@@ -141,19 +165,21 @@ const lastContentQ = new THREE.Quaternion()
 const invQ = new THREE.Quaternion()
 const alignVel = new THREE.Vector3()
 
-const positions = new Float32Array(COUNT * 3)
-const velocity = new Float32Array(COUNT * 3)
-const seek = new Float32Array(COUNT * 3)
-const slotK = new Int32Array(COUNT)
-const numbers = new Int32Array(COUNT)
+const positions = new Float32Array(MAX_COUNT * 3)
+const velocity = new Float32Array(MAX_COUNT * 3)
+const seek = new Float32Array(MAX_COUNT * 3)
+const slotK = new Int32Array(MAX_COUNT)
+const numbers = new Int32Array(MAX_COUNT)
 const behind: number[] = []
 const ahead: number[] = []
-const occupied = new Uint8Array(COUNT + 2)
-const entering = new Int32Array(COUNT)
+const occupied = new Uint8Array(MAX_COUNT + 2)
+const entering = new Int32Array(MAX_COUNT)
 const poleDir = new THREE.Vector3(0, -1, 0)
-const lastSpiralPole = new THREE.Vector3(Number.NaN, Number.NaN, Number.NaN)
 const spiralPos = new Float32Array(SPIRAL_MAX_POINTS * 3)
 const spiralCol = new Float32Array(SPIRAL_MAX_POINTS * 3)
+const spiralQ = new THREE.Quaternion()
+const spiralQFrom = new THREE.Quaternion()
+const spiralQTo = new THREE.Quaternion()
 let growth = 0
 let zoomVel = 0
 let center = 0
@@ -164,16 +190,23 @@ let lastTime = performance.now()
 let pointerDown = { x: 0, y: 0 }
 let dragging = false
 let lastActiveWheel = 0
+let lastPinch = 0
 let lastWheelMag = 0
 let wheelDecay = 0
-let lastZoom = 0
+let pendingPanAt = 0
+let pendingPanDx = 0
+let pendingPanDy = 0
 let panVx = 0
 let panVy = 0
 let handedOff = true
+let focusIndex = 0
+let focusCandidate = -1
+let focusCandidateSince = 0
 let spiralReady = false
 let lastSpiralGrowth = Number.NaN
-let lastSpiralTwist = Number.NaN
 let lastSpiralPoints = 0
+let spiralAnimT = 1
+let spiralAnimAt = 0
 
 const marker = (i: number) => markers.children[i] as THREE.Sprite
 
@@ -214,26 +247,59 @@ const setSeek = (index: number) => {
   seek.set(assignment.targets)
   twist = assignment.twist
   center = index
+  focusIndex = index
+  focusCandidate = index
   poleDir.copy(marker(index).position).normalize()
   slotK.set(assignment.ranks)
   resetZoomWindow()
   highlightMarkers()
+  beginSpiralTransition(poleDir, twist)
 }
 
-const zooming = () => Math.abs(zoomVel) > sim.zoomHandoff
+const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
+const zooming = (now = performance.now()) => Math.abs(zoomVel) > sim.zoomHandoff || pinchLive(now)
 
-const setSpiral = () => {
-  if (!showSpiral) return
-  if (
-    spiralReady &&
-    growth === lastSpiralGrowth &&
-    twist === lastSpiralTwist &&
-    lastSpiralPole.equals(poleDir)
-  ) {
+const easeSpiral = (t: number) => 1 - (1 - t) ** 3
+
+const snapSpiral = (pole: THREE.Vector3, nextTwist: number) => {
+  writeLatticePose(pole, nextTwist, spiralQ)
+  spiralQTo.copy(spiralQ)
+  spiralAnimT = 1
+  lastSpiralGrowth = Number.NaN
+}
+
+const beginSpiralTransition = (pole: THREE.Vector3, nextTwist: number) => {
+  writeLatticePose(pole, nextTwist, spiralQTo)
+  if (!spiralReady) {
+    snapSpiral(pole, nextTwist)
     return
   }
+  spiralQFrom.copy(spiralQ)
+  if (spiralQFrom.dot(spiralQTo) < 0) {
+    spiralQTo.x = -spiralQTo.x
+    spiralQTo.y = -spiralQTo.y
+    spiralQTo.z = -spiralQTo.z
+    spiralQTo.w = -spiralQTo.w
+  }
+  if (spiralQFrom.angleTo(spiralQTo) < 1e-4) {
+    spiralQ.copy(spiralQTo)
+    spiralAnimT = 1
+    return
+  }
+  spiralAnimT = 0
+  spiralAnimAt = performance.now()
+}
 
-  const points = writeOrientedSpiral(poleDir, twist, growth, spiralPos)
+const setSpiral = (now = performance.now()) => {
+  if (!showSpiral) return
+  const animating = spiralAnimT < 1
+  if (animating) {
+    spiralAnimT = Math.min(1, (now - spiralAnimAt) / SPIRAL_ANIM_MS)
+    spiralQ.slerpQuaternions(spiralQFrom, spiralQTo, easeSpiral(spiralAnimT))
+  }
+  if (spiralReady && !animating && growth === lastSpiralGrowth) return
+
+  const points = writeSpiral(spiralQ, growth, spiralPos)
   if (!spiralReady) {
     spiralGeometry.setAttribute("position", new THREE.BufferAttribute(spiralPos, 3))
     spiralGeometry.setAttribute("color", new THREE.BufferAttribute(spiralCol, 3))
@@ -254,8 +320,6 @@ const setSpiral = () => {
   }
   spiralGeometry.setDrawRange(0, points)
   lastSpiralGrowth = growth
-  lastSpiralTwist = twist
-  lastSpiralPole.copy(poleDir)
 }
 
 const setNumber = (index: number, n: number) => {
@@ -305,11 +369,12 @@ const kickZoom = (impulse: number) => {
   if (impulse === 0) return
   if (!zooming() && growth === 0 && behind.length === 0 && ahead.length === 0) {
     poleDir.copy(marker(center).position).normalize()
+    snapSpiral(poleDir, twist)
   }
   zoomVel += impulse
 }
 
-const handoffZoom = (delayRecenter = true) => {
+const handoffZoom = () => {
   if (Math.abs(zoomVel) <= 1e-8) return
   syncSlotsToGrowth()
   writeSlotTargets(slotK, growth, poleDir, twist, seek)
@@ -319,7 +384,8 @@ const handoffZoom = (delayRecenter = true) => {
   }
   zoomVel = 0
   center = polePoint()
-  if (delayRecenter) lastZoom = performance.now()
+  focusIndex = center
+  focusCandidate = center
   highlightMarkers()
 }
 
@@ -340,6 +406,7 @@ const stepZoom = (dt: number) => {
   const nextCenter = polePoint()
   if (nextCenter !== center) {
     center = nextCenter
+    focusIndex = nextCenter
     highlightMarkers()
   }
   return true
@@ -394,7 +461,9 @@ const autoAlign = (dt: number) => {
   const k = sim.alignSpring * 12
   if (k > 0) {
     const mass = Math.max(0.05, sim.alignMass)
-    const c = 2 * sim.alignDamping * Math.sqrt(k * mass)
+    const catching = focusIndex !== center
+    const damp = sim.alignDamping + (catching ? 0.35 : 0)
+    const c = 2 * damp * Math.sqrt(k * mass)
     worldPole.copy(poleDir).normalize()
     worldPole.applyQuaternion(content.quaternion)
     viewDir.copy(camera.position).normalize()
@@ -406,6 +475,41 @@ const autoAlign = (dt: number) => {
     alignVel.addScaledVector(forceVec, dt / mass)
   }
   applySphereSpin(dt)
+}
+
+const adoptFocus = (index: number, now = performance.now()) => {
+  if (index < 0) return
+  focusIndex = index
+  focusCandidate = index
+  focusCandidateSince = now
+}
+
+const stepFocus = (now: number) => {
+  if (zooming() || dragging || !handedOff) {
+    focusCandidate = -1
+    return
+  }
+
+  const candidate = aimed >= 0 ? aimed : center
+  if (candidate !== focusCandidate) {
+    focusCandidate = candidate
+    focusCandidateSince = now
+  }
+
+  const stable = now - focusCandidateSince >= FOCUS_STABLE_MS
+  const slow = alignVel.length() < 1.15
+  if (candidate !== focusIndex && stable && (slow || focusIndex === center)) {
+    focusIndex = candidate
+  }
+
+  if (focusIndex >= 0) poleDir.copy(marker(focusIndex).position).normalize()
+
+  if (focusIndex < 0 || focusIndex === center || !slow || !stable) return
+  worldPole.copy(poleDir).applyQuaternion(content.quaternion)
+  viewDir.copy(camera.position).normalize()
+  if (worldPole.angleTo(viewDir) < FOCUS_ARRIVE_ANG && alignVel.length() < FOCUS_ARRIVE_VEL) {
+    setSeek(focusIndex)
+  }
 }
 
 const stepPhysics = (dt: number) => {
@@ -460,6 +564,14 @@ const pickIndexAt = (sx: number, sy: number, radiusPx: number) => {
 
 const nearestToCrosshair = () => pickIndexAt(canvas.clientWidth * 0.5, canvas.clientHeight * 0.5, Infinity)
 
+const clearMarkers = () => {
+  for (let i = markers.children.length - 1; i >= 0; i--) {
+    const sprite = markers.children[i] as THREE.Sprite
+    sprite.material.dispose()
+    markers.remove(sprite)
+  }
+}
+
 const layout = () => {
   const scale = Math.max(0.04, 0.34 / Math.sqrt(COUNT))
   for (let i = 0; i < COUNT; i++) {
@@ -475,6 +587,36 @@ const layout = () => {
     markers.add(sprite)
   }
 }
+
+const rebuildPoints = (n: number) => {
+  setCount(n)
+  pointsValue.textContent = String(COUNT)
+  pointsInput.value = String(COUNT)
+  clearMarkers()
+  velocity.fill(0)
+  seek.fill(0)
+  behind.length = 0
+  ahead.length = 0
+  growth = 0
+  zoomVel = 0
+  twist = 0
+  center = 0
+  focusIndex = 0
+  focusCandidate = -1
+  aimed = -1
+  nextId = COUNT + 1
+  alignVel.set(0, 0, 0)
+  layout()
+  poleDir.copy(marker(0).position).normalize()
+  seek.set(readPositions())
+  lastContentQ.copy(content.quaternion)
+  lastSpiralPoints = 0
+  highlightMarkers()
+  snapSpiral(poleDir, twist)
+  setSpiral()
+}
+
+pointsInput.addEventListener("input", () => rebuildPoints(Number(pointsInput.value)))
 
 const resize = () => {
   camera.aspect = innerWidth / innerHeight
@@ -510,13 +652,15 @@ canvas.addEventListener("pointerup", (event) => {
   if (!dragging) return
   dragging = false
   const dragged = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5
-  const nearest = nearestToCrosshair()
-  if (nearest >= 0 && nearest !== center) setSeek(nearest)
-  else if (!dragged) {
+  if (!dragged) {
     const rect = canvas.getBoundingClientRect()
     const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, CROSSHAIR_PX)
     if (index >= 0) setSeek(index)
+    return
   }
+  handedOff = true
+  const nearest = nearestToCrosshair()
+  if (nearest >= 0) adoptFocus(nearest)
 })
 
 canvas.addEventListener("pointercancel", () => {
@@ -529,11 +673,11 @@ const isOsMomentum = (event: WheelEvent, mag: number) => {
     (event as WheelEvent & { webkitMomentumPhase?: number }).webkitMomentumPhase ??
     0
   if (phase) return true
-  if (handedOff) return mag <= lastWheelMag * 1.2
-  if (mag + 0.2 < lastWheelMag * 0.86) wheelDecay += 1
+  if (handedOff) return mag <= lastWheelMag * 1.15
+  if (mag + 0.2 < lastWheelMag * 0.82) wheelDecay += 1
   else if (mag > lastWheelMag) wheelDecay = 0
   lastWheelMag = mag
-  return wheelDecay >= 2
+  return wheelDecay >= 4
 }
 
 const handoffPan = () => {
@@ -542,50 +686,88 @@ const handoffPan = () => {
   const mass = Math.max(0.05, sim.alignMass)
   alignVel.x = panVx / mass
   alignVel.y = panVy / mass
+  alignVel.z = 0
   panVx = 0
   panVy = 0
+  if (aimed >= 0) adoptFocus(aimed)
 }
 
 canvas.addEventListener(
   "wheel",
   (event) => {
-    if (event.ctrlKey) {
-      event.preventDefault()
-      const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1
-      lastZoom = performance.now()
-      kickZoom(-event.deltaY * unit * sim.zoom * 28)
+    event.preventDefault()
+    const now = performance.now()
+    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1
+    let dx = event.deltaX * unit
+    let dy = event.deltaY * unit
+    const absX = Math.abs(dx)
+    const absY = Math.abs(dy)
+    const pinch = event.ctrlKey || (pinchLive(now) && absY > absX * 1.15)
+
+    if (pinch) {
+      lastPinch = now
+      pendingPanAt = 0
+      pendingPanDx = 0
+      pendingPanDy = 0
+      kickZoom(-dy * sim.zoom * 28)
       return
     }
-    event.preventDefault()
-    const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1
-    const dx = event.deltaX * unit
-    const dy = event.deltaY * unit
+
+    if (pinchLive(now) || Math.abs(zoomVel) > sim.zoomHandoff) return
+
+    if (handedOff) {
+      if (!pendingPanAt) {
+        pendingPanAt = now
+        pendingPanDx = dx
+        pendingPanDy = dy
+        return
+      }
+      pendingPanDx += dx
+      pendingPanDy += dy
+      if (now - pendingPanAt < PAN_CLASSIFY_MS) return
+      dx = pendingPanDx
+      dy = pendingPanDy
+      pendingPanAt = 0
+      pendingPanDx = 0
+      pendingPanDy = 0
+    } else {
+      pendingPanAt = 0
+    }
+
     const mag = Math.hypot(dx, dy)
     if (mag === 0) return
-    const now = performance.now()
-    handoffZoom(false)
     if (isOsMomentum(event, mag)) {
       lastWheelMag = mag
       handoffPan()
       return
     }
+    const dt = Math.min(0.05, Math.max(0.008, (now - lastActiveWheel) / 1000))
+    const vx = (-dy * PAN_ROTATE) / dt
+    const vy = (-dx * PAN_ROTATE) / dt
     if (handedOff) {
       alignVel.set(0, 0, 0)
       wheelDecay = 0
+      panVx = vx
+      panVy = vy
+    } else {
+      panVx += (vx - panVx) * PAN_VEL_SMOOTH
+      panVy += (vy - panVy) * PAN_VEL_SMOOTH
     }
     lastWheelMag = mag
-    const dt = Math.min(0.05, Math.max(0.008, (now - lastActiveWheel) / 1000))
     lastActiveWheel = now
     handedOff = false
     rotQ.setFromAxisAngle(axisVec.set(0, 1, 0), -dx * PAN_ROTATE)
     content.quaternion.premultiply(rotQ)
     rotQ.setFromAxisAngle(axisVec.set(1, 0, 0), -dy * PAN_ROTATE)
     content.quaternion.premultiply(rotQ)
-    panVx = (-dy * PAN_ROTATE) / dt
-    panVy = (-dx * PAN_ROTATE) / dt
   },
   { passive: false },
 )
+
+const ignoreGesture = (event: Event) => event.preventDefault()
+canvas.addEventListener("gesturestart", ignoreGesture)
+canvas.addEventListener("gesturechange", ignoreGesture)
+canvas.addEventListener("gestureend", ignoreGesture)
 
 addEventListener("resize", resize)
 
@@ -595,6 +777,7 @@ poleDir.copy(marker(0).position).normalize()
 seek.set(readPositions())
 lastContentQ.copy(content.quaternion)
 highlightMarkers()
+snapSpiral(poleDir, twist)
 setSpiral()
 
 renderer.setAnimationLoop(() => {
@@ -608,19 +791,8 @@ renderer.setAnimationLoop(() => {
     highlightMarkers()
   }
 
-  if (!dragging && !handedOff && now - lastActiveWheel > 80) handoffPan()
-  const lastInteract = Math.max(lastZoom, lastActiveWheel)
-  const settle = lastActiveWheel >= lastZoom ? 80 : 120
-  if (
-    !zooming() &&
-    !dragging &&
-    handedOff &&
-    now - lastInteract > settle &&
-    nextAimed >= 0 &&
-    nextAimed !== center
-  ) {
-    setSeek(nextAimed)
-  }
+  if (!dragging && !handedOff && now - lastActiveWheel > PAN_HANDOFF_MS) handoffPan()
+  stepFocus(now)
 
   if (stepZoom(dt)) {
     autoAlign(dt)
@@ -643,6 +815,6 @@ renderer.setAnimationLoop(() => {
     stepPhysics(dt)
   }
 
-  setSpiral()
+  setSpiral(now)
   renderer.render(scene, camera)
 })

@@ -1,8 +1,14 @@
 import * as THREE from "three"
 
 /** Fixed window of Vogel slots. Zoom slides this window; it does not change the count. */
-export const COUNT = 200
+export const MIN_COUNT = 5
+export const MAX_COUNT = 70
+export let COUNT = 40
 export const SPHERE_RADIUS = 1.03
+
+export const setCount = (n: number) => {
+  COUNT = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(n)))
+}
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
 
@@ -31,19 +37,27 @@ export const slotPoint = (k: number, growth: number, radius = SPHERE_RADIUS) => 
   return [tmp.x, tmp.y, tmp.z] as const
 }
 
-export const unitSlots = () => {
-  const positions = new Float32Array(COUNT * 3)
-  for (let k = 0; k < COUNT; k++) positions.set(slotPoint(k, 0, 1), k * 3)
-  return positions
+export const writeUnitSlots = (out: Float32Array) => {
+  for (let k = 0; k < COUNT; k++) {
+    writeSlotCoords(k, 0, 1, tmp)
+    out[k * 3] = tmp.x
+    out[k * 3 + 1] = tmp.y
+    out[k * 3 + 2] = tmp.z
+  }
+  return out
 }
 
-const pose = (pole: THREE.Vector3, twist: number) => {
+export const unitSlots = () => writeUnitSlots(new Float32Array(COUNT * 3))
+
+export const writeLatticePose = (pole: THREE.Vector3, twist: number, out: THREE.Quaternion) => {
   writeSlotCoords(0, 0, 1, tmpLocal).normalize()
   tmpPole.copy(pole).normalize()
-  tmpQ.setFromUnitVectors(tmpLocal, tmpPole)
+  out.setFromUnitVectors(tmpLocal, tmpPole)
   tmpTwist.setFromAxisAngle(tmpAxis.copy(tmpPole), twist)
-  return tmpQ.premultiply(tmpTwist)
+  return out.premultiply(tmpTwist)
 }
+
+const pose = (pole: THREE.Vector3, twist: number) => writeLatticePose(pole, twist, tmpQ)
 
 const writeOriented = (k: number, growth: number, radius: number, q: THREE.Quaternion, out: Float32Array, i: number) => {
   writeSlotCoords(k, growth, radius, tmp).applyQuaternion(q)
@@ -94,7 +108,7 @@ export const writeSlotVelocities = (
 }
 
 export const SPIRAL_SEGS = 20
-export const SPIRAL_MAX_POINTS = COUNT * SPIRAL_SEGS + 1
+export const SPIRAL_MAX_POINTS = MAX_COUNT * SPIRAL_SEGS + 1
 
 /** Writes the oriented spiral into `out` and returns the point count. */
 export const writeOrientedSpiral = (
@@ -103,8 +117,9 @@ export const writeOrientedSpiral = (
   growth: number,
   out: Float32Array,
   segs = SPIRAL_SEGS,
-) => {
-  const q = pose(pole, twist)
+) => writeSpiral(pose(pole, twist), growth, out, segs)
+
+export const writeSpiral = (q: THREE.Quaternion, growth: number, out: Float32Array, segs = SPIRAL_SEGS) => {
   const { kMin, kMax } = slotRange(growth)
   let w = 0
   for (let k = kMin; k < kMax; k++) {

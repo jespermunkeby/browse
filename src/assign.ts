@@ -1,11 +1,11 @@
 import * as THREE from "three"
 import { createLapjvScratch, lapjv } from "./lapjv.ts"
-import { COUNT, SPHERE_RADIUS, unitSlots } from "./lattice.ts"
+import { COUNT, MAX_COUNT, SPHERE_RADIUS, writeUnitSlots } from "./lattice.ts"
 
 const COARSE = 14
 const REFINE = 8
-const N = COUNT - 1
-const SLOT_IDS = Array.from({ length: N }, (_, i) => i + 1)
+const MAX_N = MAX_COUNT - 1
+const SLOT_IDS = Array.from({ length: MAX_N }, (_, i) => i + 1)
 
 export type Assignment = {
   targets: Float32Array
@@ -15,15 +15,23 @@ export type Assignment = {
 
 const tmpPole = new THREE.Vector3()
 const tmpQ = new THREE.Quaternion()
-const local = unitSlots()
-const aligned = new Float32Array(COUNT * 3)
-const twisted = new Float32Array(COUNT * 3)
-const pointDirs = new Float32Array(N * 3)
-const cost = new Float64Array(N * N)
-const assign = new Int32Array(N)
-const bestAssign = new Int32Array(N)
-const bestSlots = new Float32Array(COUNT * 3)
-const jv = createLapjvScratch(N)
+const local = new Float32Array(MAX_COUNT * 3)
+const aligned = new Float32Array(MAX_COUNT * 3)
+const twisted = new Float32Array(MAX_COUNT * 3)
+const pointDirs = new Float32Array(MAX_N * 3)
+const cost = new Float64Array(MAX_N * MAX_N)
+const assign = new Int32Array(MAX_N)
+const bestAssign = new Int32Array(MAX_N)
+const bestSlots = new Float32Array(MAX_COUNT * 3)
+const jv = createLapjvScratch(MAX_N)
+const pointIds = new Array<number>(MAX_N)
+let packedCount = 0
+
+const syncSlots = () => {
+  if (packedCount === COUNT) return
+  packedCount = COUNT
+  writeUnitSlots(local)
+}
 
 const clampDot = (d: number) => (d < -1 ? -1 : d > 1 ? 1 : d)
 
@@ -65,13 +73,13 @@ const twistAroundPole = (src: Float32Array, pole: THREE.Vector3, twist: number, 
   }
 }
 
-const fillSquaredCost = (slotIds: number[]) => {
-  for (let i = 0; i < N; i++) {
+const fillSquaredCost = (n: number, slotIds: number[]) => {
+  for (let i = 0; i < n; i++) {
     const px = pointDirs[i * 3]
     const py = pointDirs[i * 3 + 1]
     const pz = pointDirs[i * 3 + 2]
-    const row = i * N
-    for (let j = 0; j < N; j++) {
+    const row = i * n
+    for (let j = 0; j < n; j++) {
       const s = slotIds[j] * 3
       cost[row + j] = squaredAngleFromDot(px * twisted[s] + py * twisted[s + 1] + pz * twisted[s + 2])
     }
@@ -113,9 +121,11 @@ const applyMap = (center: number, pointIds: number[], slotIds: number[]) => {
 
 /** Min-squared-travel recenter: LAPJV on θ², 14+8 twist search. */
 export const reassign = (positions: Float32Array, center: number): Assignment => {
-  const pointIds = new Array<number>(N)
+  syncSlots()
+  const n = COUNT - 1
   let k = 0
   for (let i = 0; i < COUNT; i++) if (i !== center) pointIds[k++] = i
+  pointIds.length = n
 
   packPointDirs(positions, pointIds)
   const pole = new THREE.Vector3(
@@ -130,13 +140,13 @@ export const reassign = (positions: Float32Array, center: number): Assignment =>
 
   const consider = (twist: number) => {
     twistAroundPole(aligned, pole, twist, twisted)
-    fillSquaredCost(SLOT_IDS)
-    const total = lapjv(cost, N, assign, jv)
+    fillSquaredCost(n, SLOT_IDS)
+    const total = lapjv(cost, n, assign, jv)
     if (total < bestCost) {
       bestCost = total
       bestTwist = twist
-      bestAssign.set(assign)
-      bestSlots.set(twisted)
+      bestAssign.set(assign.subarray(0, n))
+      bestSlots.set(twisted.subarray(0, COUNT * 3))
     }
     return total
   }
