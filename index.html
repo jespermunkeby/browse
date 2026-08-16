@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Fibonacci Sphere</title>
+  </head>
+  <body>
+    <canvas id="canvas"></canvas>
+    <div class="panel">
+      <label>
+        Points
+        <input id="count" type="range" min="1" max="2000" value="200" />
+        <output id="count-value">200</output>
+      </label>
+      <label>
+        View
+        <input id="rotation" type="range" min="0" max="360" value="0" />
+        <output id="rotation-value">0°</output>
+      </label>
+
+      <p class="hint">Click a number. It stays put and becomes the new 1; everyone else is reassigned onto a Fibonacci spiral around it.</p>
+      <div id="center-line">No center selected</div>
+
+      <table class="methods">
+        <thead>
+          <tr>
+            <th>Method</th>
+            <th>Mean</th>
+            <th>Max</th>
+            <th title="Pairs of great-circle paths that intersect">Cross</th>
+          </tr>
+        </thead>
+        <tbody id="methods-body"></tbody>
+      </table>
+      <p id="method-hint" class="hint"></p>
+
+      <label>
+        Twist
+        <input id="twist" type="range" min="0" max="360" value="0" />
+        <output id="twist-value">auto</output>
+      </label>
+      <label class="check">
+        <input id="auto-twist" type="checkbox" checked />
+        Auto twist
+      </label>
+
+      <div class="row">
+        <button id="play" type="button" disabled>Play</button>
+        <button id="reset" type="button">Reset</button>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

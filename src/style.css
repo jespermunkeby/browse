@@ -1,0 +1,129 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: #111;
+  color: #aaa;
+  font: 13px/1.4 system-ui, sans-serif;
+}
+
+#canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.panel {
+  position: absolute;
+  top: 16px;
+  left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 320px;
+}
+
+.panel label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.panel output {
+  min-width: 2.5em;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.panel input[type="range"] {
+  width: 160px;
+  accent-color: #fff;
+}
+
+.hint {
+  margin: 6px 0 0;
+  color: #666;
+}
+
+#center-line {
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+
+.methods {
+  border-collapse: collapse;
+  width: 100%;
+  margin-top: 4px;
+}
+
+.methods th,
+.methods td {
+  text-align: left;
+  padding: 3px 6px 3px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.methods th {
+  color: #666;
+  font-weight: 500;
+}
+
+.methods th:not(:first-child),
+.methods td:not(:first-child) {
+  text-align: right;
+}
+
+.methods tbody tr {
+  cursor: pointer;
+  color: #888;
+}
+
+.methods tbody tr:hover {
+  color: #ccc;
+}
+
+.methods tbody tr.active {
+  color: #fff;
+}
+
+.methods tbody tr.disabled {
+  cursor: default;
+  color: #555;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.panel button {
+  background: #222;
+  color: #ddd;
+  border: 1px solid #333;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.panel button:hover:not(:disabled) {
+  color: #fff;
+  border-color: #555;
+}
+
+.panel button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.check {
+  color: #888;
+}
+
+.check input {
+  accent-color: #fff;
+}
