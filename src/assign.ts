@@ -1,31 +1,29 @@
 import * as THREE from "three"
 import { createLapjvScratch, lapjv } from "./lapjv.ts"
-import { fibonacciPoint, fibonacciSphere, slotForNumber } from "./fibonacciSphere.ts"
+import { COUNT, SPHERE_RADIUS, unitSlots } from "./lattice.ts"
 
-export const COUNT = 200
 const COARSE = 14
 const REFINE = 8
+const N = COUNT - 1
+const SLOT_IDS = Array.from({ length: N }, (_, i) => i + 1)
 
 export type Assignment = {
   targets: Float32Array
+  ranks: Int32Array
   twist: number
 }
 
-const poleSlot = (count: number) => slotForNumber(1, count)
-
-const tmpA = new THREE.Vector3()
-const tmpQ = new THREE.Quaternion()
-const tmpTwist = new THREE.Quaternion()
-const tmpAxis = new THREE.Vector3()
 const tmpPole = new THREE.Vector3()
-const tmpLocal = new THREE.Vector3()
-const tmpV = new THREE.Vector3()
-
-const write = (buf: Float32Array, i: number, v: THREE.Vector3) => {
-  buf[i * 3] = v.x
-  buf[i * 3 + 1] = v.y
-  buf[i * 3 + 2] = v.z
-}
+const tmpQ = new THREE.Quaternion()
+const local = unitSlots()
+const aligned = new Float32Array(COUNT * 3)
+const twisted = new Float32Array(COUNT * 3)
+const pointDirs = new Float32Array(N * 3)
+const cost = new Float64Array(N * N)
+const assign = new Int32Array(N)
+const bestAssign = new Int32Array(N)
+const bestSlots = new Float32Array(COUNT * 3)
+const jv = createLapjvScratch(N)
 
 const clampDot = (d: number) => (d < -1 ? -1 : d > 1 ? 1 : d)
 
@@ -34,209 +32,106 @@ const squaredAngleFromDot = (dot: number) => {
   return t * t
 }
 
-const latticeRotation = (count: number, pole: THREE.Vector3, twist: number) => {
-  const localPole = fibonacciPoint(poleSlot(count), count, 1)
-  tmpLocal.set(localPole[0], localPole[1], localPole[2]).normalize()
-  tmpPole.copy(pole).normalize()
-  tmpQ.setFromUnitVectors(tmpLocal, tmpPole)
-  tmpTwist.setFromAxisAngle(tmpAxis.copy(tmpPole), twist)
-  return tmpQ.premultiply(tmpTwist)
-}
-
-export const orientedSpiral = (
-  count: number,
-  radius: number,
-  pole: THREE.Vector3,
-  twist: number,
-) => {
-  const q = latticeRotation(count, pole, twist)
-  const segs = 20
-  const samples = (count - 1) * segs + 1
-  const out = new Float32Array(samples * 3)
-  let w = 0
-  for (let n = 0; n < count - 1; n++) {
-    const i0 = count - 1 - n
-    const i1 = i0 - 1
-    for (let s = 0; s < segs; s++) {
-      const point = fibonacciPoint(i0 + (i1 - i0) * (s / segs), count, radius)
-      tmpA.set(point[0], point[1], point[2]).applyQuaternion(q)
-      write(out, w++, tmpA)
-    }
-  }
-  const last = fibonacciPoint(0, count, radius)
-  tmpA.set(last[0], last[1], last[2]).applyQuaternion(q)
-  write(out, w, tmpA)
-  return out
-}
-
-const remainingPoints = (count: number, center: number) => {
-  const ids = new Array<number>(count - 1)
-  let k = 0
-  for (let i = 0; i < count; i++) if (i !== center) ids[k++] = i
-  return ids
-}
-
-const remainingSlots = (count: number) => {
-  const pole = poleSlot(count)
-  const ids = new Array<number>(count - 1)
-  let k = 0
-  for (let s = 0; s < count; s++) if (s !== pole) ids[k++] = s
-  return ids
-}
-
-const applyQuaternion = (buf: Float32Array, count: number, q: THREE.Quaternion) => {
-  for (let i = 0; i < count; i++) {
-    tmpV.set(buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]).applyQuaternion(q)
-    buf[i * 3] = tmpV.x
-    buf[i * 3 + 1] = tmpV.y
-    buf[i * 3 + 2] = tmpV.z
+const applyQuaternion = (buf: Float32Array, q: THREE.Quaternion) => {
+  const v = tmpPole
+  for (let i = 0; i < COUNT; i++) {
+    v.set(buf[i * 3], buf[i * 3 + 1], buf[i * 3 + 2]).applyQuaternion(q)
+    buf[i * 3] = v.x
+    buf[i * 3 + 1] = v.y
+    buf[i * 3 + 2] = v.z
   }
 }
 
-const alignToPole = (
-  local: Float32Array,
-  count: number,
-  pole: THREE.Vector3,
-  out: Float32Array,
-) => {
+const alignToPole = (pole: THREE.Vector3, out: Float32Array) => {
   out.set(local)
-  const ps = poleSlot(count)
-  tmpLocal.set(out[ps * 3], out[ps * 3 + 1], out[ps * 3 + 2]).normalize()
-  tmpPole.copy(pole).normalize()
-  tmpQ.setFromUnitVectors(tmpLocal, tmpPole)
-  applyQuaternion(out, count, tmpQ)
+  tmpPole.set(out[0], out[1], out[2]).normalize()
+  tmpQ.setFromUnitVectors(tmpPole, pole)
+  applyQuaternion(out, tmpQ)
 }
 
-const twistAroundPole = (
-  aligned: Float32Array,
-  count: number,
-  pole: THREE.Vector3,
-  twist: number,
-  out: Float32Array,
-) => {
-  const kx = pole.x
-  const ky = pole.y
-  const kz = pole.z
+const twistAroundPole = (src: Float32Array, pole: THREE.Vector3, twist: number, out: Float32Array) => {
+  const { x: kx, y: ky, z: kz } = pole
   const c = Math.cos(twist)
   const s = Math.sin(twist)
   const w = 1 - c
-  for (let i = 0; i < count; i++) {
-    const x = aligned[i * 3]
-    const y = aligned[i * 3 + 1]
-    const z = aligned[i * 3 + 2]
+  for (let i = 0; i < COUNT; i++) {
+    const x = src[i * 3]
+    const y = src[i * 3 + 1]
+    const z = src[i * 3 + 2]
     const kdot = kx * x + ky * y + kz * z
-    const cx = ky * z - kz * y
-    const cy = kz * x - kx * z
-    const cz = kx * y - ky * x
-    out[i * 3] = x * c + cx * s + kx * kdot * w
-    out[i * 3 + 1] = y * c + cy * s + ky * kdot * w
-    out[i * 3 + 2] = z * c + cz * s + kz * kdot * w
+    out[i * 3] = x * c + (ky * z - kz * y) * s + kx * kdot * w
+    out[i * 3 + 1] = y * c + (kz * x - kx * z) * s + ky * kdot * w
+    out[i * 3 + 2] = z * c + (kx * y - ky * x) * s + kz * kdot * w
   }
 }
 
-const fillSquaredCost = (
-  pointDirs: Float32Array,
-  slots: Float32Array,
-  slotIds: number[],
-  n: number,
-  cost: Float64Array,
-) => {
-  for (let i = 0; i < n; i++) {
+const fillSquaredCost = (slotIds: number[]) => {
+  for (let i = 0; i < N; i++) {
     const px = pointDirs[i * 3]
     const py = pointDirs[i * 3 + 1]
     const pz = pointDirs[i * 3 + 2]
-    const row = i * n
-    for (let j = 0; j < n; j++) {
+    const row = i * N
+    for (let j = 0; j < N; j++) {
       const s = slotIds[j] * 3
-      cost[row + j] = squaredAngleFromDot(px * slots[s] + py * slots[s + 1] + pz * slots[s + 2])
+      cost[row + j] = squaredAngleFromDot(px * twisted[s] + py * twisted[s + 1] + pz * twisted[s + 2])
     }
   }
 }
 
-const packPointDirs = (positions: Float32Array, pointIds: number[], out: Float32Array) => {
+const packPointDirs = (positions: Float32Array, pointIds: number[]) => {
   for (let i = 0; i < pointIds.length; i++) {
     const p = pointIds[i] * 3
     const x = positions[p]
     const y = positions[p + 1]
     const z = positions[p + 2]
     const inv = 1 / Math.hypot(x, y, z)
-    out[i * 3] = x * inv
-    out[i * 3 + 1] = y * inv
-    out[i * 3 + 2] = z * inv
+    pointDirs[i * 3] = x * inv
+    pointDirs[i * 3 + 1] = y * inv
+    pointDirs[i * 3 + 2] = z * inv
   }
 }
 
-const applyMap = (
-  count: number,
-  center: number,
-  slots: Float32Array,
-  pointIds: number[],
-  slotIds: number[],
-  assign: Int32Array,
-  radius: number,
-) => {
-  const targets = new Float32Array(count * 3)
-  const ps = poleSlot(count)
-  targets[center * 3] = slots[ps * 3] * radius
-  targets[center * 3 + 1] = slots[ps * 3 + 1] * radius
-  targets[center * 3 + 2] = slots[ps * 3 + 2] * radius
+const applyMap = (center: number, pointIds: number[], slotIds: number[]) => {
+  const targets = new Float32Array(COUNT * 3)
+  const ranks = new Int32Array(COUNT)
+  ranks[center] = 0
+  targets[center * 3] = bestSlots[0] * SPHERE_RADIUS
+  targets[center * 3 + 1] = bestSlots[1] * SPHERE_RADIUS
+  targets[center * 3 + 2] = bestSlots[2] * SPHERE_RADIUS
   for (let i = 0; i < pointIds.length; i++) {
-    const p = pointIds[i] * 3
-    const s = slotIds[assign[i]] * 3
-    targets[p] = slots[s] * radius
-    targets[p + 1] = slots[s + 1] * radius
-    targets[p + 2] = slots[s + 2] * radius
+    const id = pointIds[i]
+    const slot = slotIds[assign[i]]
+    ranks[id] = slot
+    const p = id * 3
+    const s = slot * 3
+    targets[p] = bestSlots[s] * SPHERE_RADIUS
+    targets[p + 1] = bestSlots[s + 1] * SPHERE_RADIUS
+    targets[p + 2] = bestSlots[s + 2] * SPHERE_RADIUS
   }
-  return targets
-}
-
-const localSphereCache = new Map<number, Float32Array>()
-
-const cachedLocalSphere = (count: number) => {
-  const hit = localSphereCache.get(count)
-  if (hit) return hit
-  const local = fibonacciSphere(count, 1)
-  localSphereCache.set(count, local)
-  return local
+  return { targets, ranks }
 }
 
 /** Min-squared-travel recenter: LAPJV on θ², 14+8 twist search. */
-export const reassign = (
-  positions: Float32Array,
-  count: number,
-  center: number,
-  radius: number,
-): Assignment => {
-  const pointIds = remainingPoints(count, center)
-  const slotIds = remainingSlots(count)
-  const n = pointIds.length
-  if (n === 0) return { targets: positions.slice(), twist: 0 }
+export const reassign = (positions: Float32Array, center: number): Assignment => {
+  const pointIds = new Array<number>(N)
+  let k = 0
+  for (let i = 0; i < COUNT; i++) if (i !== center) pointIds[k++] = i
 
-  const local = cachedLocalSphere(count)
-  const aligned = new Float32Array(count * 3)
-  const twisted = new Float32Array(count * 3)
-  const pointDirs = new Float32Array(n * 3)
-  const cost = new Float64Array(n * n)
-  const assign = new Int32Array(n)
-  const jv = createLapjvScratch(n)
-  packPointDirs(positions, pointIds, pointDirs)
-
+  packPointDirs(positions, pointIds)
   const pole = new THREE.Vector3(
     positions[center * 3],
     positions[center * 3 + 1],
     positions[center * 3 + 2],
   ).normalize()
-  alignToPole(local, count, pole, aligned)
+  alignToPole(pole, aligned)
 
   let bestCost = Infinity
   let bestTwist = 0
-  let bestAssign = new Int32Array(n)
-  let bestSlots = new Float32Array(count * 3)
 
   const consider = (twist: number) => {
-    twistAroundPole(aligned, count, pole, twist, twisted)
-    fillSquaredCost(pointDirs, twisted, slotIds, n, cost)
-    const total = lapjv(cost, n, assign, jv)
+    twistAroundPole(aligned, pole, twist, twisted)
+    fillSquaredCost(SLOT_IDS)
+    const total = lapjv(cost, N, assign, jv)
     if (total < bestCost) {
       bestCost = total
       bestTwist = twist
@@ -261,32 +156,11 @@ export const reassign = (
     consider(coarseBest - window + (i / Math.max(REFINE - 1, 1)) * 2 * window)
   }
 
-  const wrap = ((bestTwist % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2)
+  assign.set(bestAssign)
+  const mapped = applyMap(center, pointIds, SLOT_IDS)
   return {
-    targets: applyMap(count, center, bestSlots, pointIds, slotIds, bestAssign, radius),
-    twist: wrap,
+    targets: mapped.targets,
+    ranks: mapped.ranks,
+    twist: ((bestTwist % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2),
   }
-}
-
-export const nearestToDir = (
-  positions: Float32Array,
-  count: number,
-  dirx: number,
-  diry: number,
-  dirz: number,
-  k: number,
-) => {
-  const scored = new Array<{ i: number; dot: number }>(count)
-  for (let i = 0; i < count; i++) {
-    const x = positions[i * 3]
-    const y = positions[i * 3 + 1]
-    const z = positions[i * 3 + 2]
-    const inv = 1 / Math.hypot(x, y, z)
-    scored[i] = { i, dot: (x * dirx + y * diry + z * dirz) * inv }
-  }
-  scored.sort((a, b) => b.dot - a.dot)
-  const n = Math.min(k, count)
-  const out = new Array<number>(n)
-  for (let i = 0; i < n; i++) out[i] = scored[i].i
-  return out
 }
