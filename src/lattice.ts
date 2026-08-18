@@ -19,12 +19,15 @@ const tmpAxis = new THREE.Vector3()
 const tmpQ = new THREE.Quaternion()
 const tmpTwist = new THREE.Quaternion()
 
+/** Geometric pole of the Vogel spiral (k = -0.5). Slot 0 sits a band away. */
+export const LOCAL_TIP = new THREE.Vector3(0, -1, 0)
+
 export const slotRange = (growth: number) => ({
   kMin: Math.ceil(-growth - 0.5),
   kMax: Math.floor(COUNT - growth - 0.5),
 })
 
-/** k = 0 is the facing centre. growth pushes every slot toward the back. */
+/** k = 0 is the first lattice point. The spiral origin is k = -0.5 (LOCAL_TIP). */
 const writeSlotCoords = (k: number, growth: number, radius: number, out: THREE.Vector3) => {
   const y = Math.min(1, Math.max(-1, -1 + (2 * (k + growth + 0.5)) / COUNT))
   const r = Math.sqrt(Math.max(0, 1 - y * y)) * radius
@@ -55,6 +58,12 @@ export const writeLatticePose = (pole: THREE.Vector3, twist: number, out: THREE.
   out.setFromUnitVectors(tmpLocal, tmpPole)
   tmpTwist.setFromAxisAngle(tmpAxis.copy(tmpPole), twist)
   return out.premultiply(tmpTwist)
+}
+
+/** Content-space direction of the spiral origin for a slot-0-aligned pose. */
+export const writeTipDir = (pole: THREE.Vector3, twist: number, out: THREE.Vector3) => {
+  writeLatticePose(pole, twist, tmpQ)
+  return out.copy(LOCAL_TIP).applyQuaternion(tmpQ)
 }
 
 const pose = (pole: THREE.Vector3, twist: number) => writeLatticePose(pole, twist, tmpQ)
@@ -120,11 +129,10 @@ export const writeOrientedSpiral = (
 ) => writeSpiral(pose(pole, twist), growth, out, segs)
 
 export const writeSpiral = (q: THREE.Quaternion, growth: number, out: Float32Array, segs = SPIRAL_SEGS) => {
-  const { kMin, kMax } = slotRange(growth)
+  const { kMax } = slotRange(growth)
+  const kStart = -growth - 0.5
+  const steps = Math.max(1, Math.round((kMax - kStart) * segs))
   let w = 0
-  for (let k = kMin; k < kMax; k++) {
-    for (let s = 0; s < segs; s++) writeOriented(k + s / segs, growth, SPHERE_RADIUS, q, out, w++)
-  }
-  writeOriented(kMax, growth, SPHERE_RADIUS, q, out, w++)
+  for (let i = 0; i <= steps; i++) writeOriented(kStart + i / segs, growth, SPHERE_RADIUS, q, out, w++)
   return w
 }

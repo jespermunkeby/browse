@@ -14,6 +14,7 @@ import {
   writeSpiral,
   writeSlotTargets,
   writeSlotVelocities,
+  writeTipDir,
 } from "./lattice.ts"
 import { reassign } from "./assign.ts"
 
@@ -464,7 +465,8 @@ const autoAlign = (dt: number) => {
     const catching = focusIndex !== center
     const damp = sim.alignDamping + (catching ? 0.35 : 0)
     const c = 2 * damp * Math.sqrt(k * mass)
-    worldPole.copy(poleDir).normalize()
+    if (catching) worldPole.copy(poleDir).normalize()
+    else writeTipDir(poleDir, twist, worldPole)
     worldPole.applyQuaternion(content.quaternion)
     viewDir.copy(camera.position).normalize()
     rotQ.setFromUnitVectors(worldPole, viewDir)
