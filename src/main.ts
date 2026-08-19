@@ -14,7 +14,6 @@ import {
   writeSpiral,
   writeSlotTargets,
   writeSlotVelocities,
-  writeTipDir,
 } from "./lattice.ts"
 import { reassign } from "./assign.ts"
 
@@ -47,8 +46,6 @@ const PAN_ROTATE = 0.0024
 const PAN_HANDOFF_MS = 140
 const PAN_VEL_SMOOTH = 0.38
 const FOCUS_STABLE_MS = 160
-const FOCUS_ARRIVE_ANG = 0.12
-const FOCUS_ARRIVE_VEL = 0.45
 const ZOOM_LOCK_MS = 260
 const PAN_CLASSIFY_MS = 70
 const SPIRAL_ANIM_MS = 480
@@ -138,15 +135,13 @@ const spiral = new THREE.Line(
 )
 spiral.frustumCulled = false
 spiral.renderOrder = 2
-content.add(spiral)
+// World-space, locked to the view axis — not a child of the rotating globe.
+scene.add(spiral)
 
 spiralCheck.addEventListener("change", () => {
   showSpiral = spiralCheck.checked
   spiral.visible = showSpiral
-  if (showSpiral) {
-    snapSpiral(poleDir, twist)
-    setSpiral()
-  }
+  if (showSpiral) setSpiral()
 })
 
 const pickWorld = new THREE.Vector3()
@@ -169,6 +164,8 @@ const alignVel = new THREE.Vector3()
 const positions = new Float32Array(MAX_COUNT * 3)
 const velocity = new Float32Array(MAX_COUNT * 3)
 const seek = new Float32Array(MAX_COUNT * 3)
+const prevLattice = new Float32Array(MAX_COUNT * 3)
+const remapped = new Uint8Array(MAX_COUNT)
 const slotK = new Int32Array(MAX_COUNT)
 const numbers = new Int32Array(MAX_COUNT)
 const behind: number[] = []
@@ -178,13 +175,13 @@ const entering = new Int32Array(MAX_COUNT)
 const poleDir = new THREE.Vector3(0, -1, 0)
 const spiralPos = new Float32Array(SPIRAL_MAX_POINTS * 3)
 const spiralCol = new Float32Array(SPIRAL_MAX_POINTS * 3)
-const spiralQ = new THREE.Quaternion()
-const spiralQFrom = new THREE.Quaternion()
-const spiralQTo = new THREE.Quaternion()
 let growth = 0
 let zoomVel = 0
 let center = 0
 let twist = 0
+let spiralTwist = 0
+let twistFrom = 0
+let twistTo = 0
 let nextId = COUNT + 1
 let aimed = -1
 let lastTime = performance.now()
@@ -200,14 +197,15 @@ let pendingPanDy = 0
 let panVx = 0
 let panVy = 0
 let handedOff = true
+let seeking = true
 let focusIndex = 0
 let focusCandidate = -1
 let focusCandidateSince = 0
 let spiralReady = false
 let lastSpiralGrowth = Number.NaN
 let lastSpiralPoints = 0
-let spiralAnimT = 1
-let spiralAnimAt = 0
+let twistAnimT = 1
+let twistAnimAt = 0
 
 const marker = (i: number) => markers.children[i] as THREE.Sprite
 
@@ -243,64 +241,38 @@ const highlightMarkers = () => {
   crosshair.classList.toggle("is-hot", aimed >= 0 && aimed !== center)
 }
 
-const setSeek = (index: number) => {
-  const assignment = reassign(readPositions(), index)
-  seek.set(assignment.targets)
-  twist = assignment.twist
-  center = index
-  focusIndex = index
-  focusCandidate = index
-  poleDir.copy(marker(index).position).normalize()
-  slotK.set(assignment.ranks)
-  resetZoomWindow()
-  highlightMarkers()
-  beginSpiralTransition(poleDir, twist)
-}
+const TAU = Math.PI * 2
+const wrapPi = (a: number) => ((a + Math.PI) % TAU + TAU) % TAU - Math.PI
+const easeTwist = (t: number) => 1 - (1 - t) ** 3
 
-const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
-const zooming = (now = performance.now()) => Math.abs(zoomVel) > sim.zoomHandoff || pinchLive(now)
-
-const easeSpiral = (t: number) => 1 - (1 - t) ** 3
-
-const snapSpiral = (pole: THREE.Vector3, nextTwist: number) => {
-  writeLatticePose(pole, nextTwist, spiralQ)
-  spiralQTo.copy(spiralQ)
-  spiralAnimT = 1
-  lastSpiralGrowth = Number.NaN
-}
-
-const beginSpiralTransition = (pole: THREE.Vector3, nextTwist: number) => {
-  writeLatticePose(pole, nextTwist, spiralQTo)
-  if (!spiralReady) {
-    snapSpiral(pole, nextTwist)
+const beginTwist = (next: number) => {
+  twist = ((next % TAU) + TAU) % TAU
+  const delta = wrapPi(twist - spiralTwist)
+  if (Math.abs(delta) < 1e-4) {
+    spiralTwist = twist
+    twistAnimT = 1
     return
   }
-  spiralQFrom.copy(spiralQ)
-  if (spiralQFrom.dot(spiralQTo) < 0) {
-    spiralQTo.x = -spiralQTo.x
-    spiralQTo.y = -spiralQTo.y
-    spiralQTo.z = -spiralQTo.z
-    spiralQTo.w = -spiralQTo.w
-  }
-  if (spiralQFrom.angleTo(spiralQTo) < 1e-4) {
-    spiralQ.copy(spiralQTo)
-    spiralAnimT = 1
-    return
-  }
-  spiralAnimT = 0
-  spiralAnimAt = performance.now()
+  twistFrom = spiralTwist
+  twistTo = spiralTwist + delta
+  twistAnimT = 0
+  twistAnimAt = performance.now()
 }
 
 const setSpiral = (now = performance.now()) => {
   if (!showSpiral) return
-  const animating = spiralAnimT < 1
-  if (animating) {
-    spiralAnimT = Math.min(1, (now - spiralAnimAt) / SPIRAL_ANIM_MS)
-    spiralQ.slerpQuaternions(spiralQFrom, spiralQTo, easeSpiral(spiralAnimT))
-  }
-  if (spiralReady && !animating && growth === lastSpiralGrowth) return
 
-  const points = writeSpiral(spiralQ, growth, spiralPos)
+  if (twistAnimT < 1) {
+    twistAnimT = Math.min(1, (now - twistAnimAt) / SPIRAL_ANIM_MS)
+    spiralTwist = twistFrom + (twistTo - twistFrom) * easeTwist(twistAnimT)
+    if (twistAnimT >= 1) spiralTwist = twist
+  }
+
+  writeLatticePose(viewDir.copy(camera.position).normalize(), spiralTwist, spiral.quaternion)
+
+  if (spiralReady && growth === lastSpiralGrowth) return
+
+  const points = writeSpiral(growth, spiralPos)
   if (!spiralReady) {
     spiralGeometry.setAttribute("position", new THREE.BufferAttribute(spiralPos, 3))
     spiralGeometry.setAttribute("color", new THREE.BufferAttribute(spiralCol, 3))
@@ -323,6 +295,24 @@ const setSpiral = (now = performance.now()) => {
   lastSpiralGrowth = growth
 }
 
+const setSeek = (index: number) => {
+  const assignment = reassign(readPositions(), index)
+  seek.set(assignment.targets)
+  center = index
+  focusIndex = index
+  focusCandidate = index
+  poleDir.copy(marker(index).position).normalize()
+  slotK.set(assignment.ranks)
+  resetZoomWindow()
+  highlightMarkers()
+  prevLattice.set(assignment.targets)
+  seeking = true
+  beginTwist(assignment.twist)
+}
+
+const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
+const zooming = (now = performance.now()) => Math.abs(zoomVel) > sim.zoomHandoff || pinchLive(now)
+
 const setNumber = (index: number, n: number) => {
   numbers[index] = n
   marker(index).material.map = badgeTexture(n)
@@ -331,20 +321,38 @@ const setNumber = (index: number, n: number) => {
 
 const takeId = (stack: number[]) => stack.pop() ?? nextId++
 
-const placeOnLattice = () => {
+const captureLattice = () => {
+  writeSlotTargets(slotK, growth, poleDir, twist, prevLattice)
+}
+
+const slideOnLattice = () => {
   writeSlotTargets(slotK, growth, poleDir, twist, seek)
   for (let i = 0; i < COUNT; i++) {
-    marker(i).position.set(seek[i * 3], seek[i * 3 + 1], seek[i * 3 + 2])
-    velocity[i * 3] = 0
-    velocity[i * 3 + 1] = 0
-    velocity[i * 3 + 2] = 0
+    const p = i * 3
+    const pos = marker(i).position
+    if (remapped[i]) {
+      pos.set(seek[p], seek[p + 1], seek[p + 2])
+      velocity[p] = 0
+      velocity[p + 1] = 0
+      velocity[p + 2] = 0
+      continue
+    }
+    velVec.set(prevLattice[p], prevLattice[p + 1], prevLattice[p + 2])
+    seekVec.set(seek[p], seek[p + 1], seek[p + 2])
+    if (velVec.lengthSq() > 1e-12 && seekVec.lengthSq() > 1e-12 && velVec.distanceToSquared(seekVec) > 1e-16) {
+      rotQ.setFromUnitVectors(velVec.normalize(), seekVec.normalize())
+      pos.applyQuaternion(rotQ)
+    }
+    pos.setLength(SPHERE_RADIUS)
   }
+  prevLattice.set(seek)
 }
 
 const syncSlotsToGrowth = () => {
   const { kMin, kMax } = slotRange(growth)
   const span = kMax - kMin + 1
   occupied.fill(0, 0, span)
+  remapped.fill(0)
   for (let i = 0; i < COUNT; i++) {
     const k = slotK[i]
     if (k >= kMin && k <= kMax) occupied[k - kMin] = 1
@@ -363,14 +371,18 @@ const syncSlotsToGrowth = () => {
       setNumber(i, takeId(behind))
     }
     slotK[i] = next
+    remapped[i] = 1
   }
 }
 
 const kickZoom = (impulse: number) => {
   if (impulse === 0) return
-  if (!zooming() && growth === 0 && behind.length === 0 && ahead.length === 0) {
-    poleDir.copy(marker(center).position).normalize()
-    snapSpiral(poleDir, twist)
+  if (!zooming()) {
+    captureLattice()
+    focusIndex = center
+    focusCandidate = center
+    spiralTwist = twist
+    twistAnimT = 1
   }
   zoomVel += impulse
 }
@@ -380,9 +392,6 @@ const handoffZoom = () => {
   syncSlotsToGrowth()
   writeSlotTargets(slotK, growth, poleDir, twist, seek)
   writeSlotVelocities(slotK, growth, poleDir, twist, zoomVel, velocity)
-  for (let i = 0; i < COUNT; i++) {
-    marker(i).position.set(seek[i * 3], seek[i * 3 + 1], seek[i * 3 + 2])
-  }
   zoomVel = 0
   center = polePoint()
   focusIndex = center
@@ -398,17 +407,17 @@ const stepZoom = (dt: number) => {
   }
   growth += zoomVel * dt
   zoomVel *= Math.exp(-sim.zoomDamp * dt)
-  if (!zooming()) {
-    handoffZoom()
-    return false
-  }
   syncSlotsToGrowth()
-  placeOnLattice()
+  slideOnLattice()
   const nextCenter = polePoint()
   if (nextCenter !== center) {
     center = nextCenter
     focusIndex = nextCenter
     highlightMarkers()
+  }
+  if (!zooming()) {
+    handoffZoom()
+    return false
   }
   return true
 }
@@ -462,28 +471,22 @@ const autoAlign = (dt: number) => {
   const k = sim.alignSpring * 12
   if (k > 0) {
     const mass = Math.max(0.05, sim.alignMass)
-    const catching = focusIndex !== center
-    const damp = sim.alignDamping + (catching ? 0.35 : 0)
-    const c = 2 * damp * Math.sqrt(k * mass)
-    if (catching) worldPole.copy(poleDir).normalize()
-    else writeTipDir(poleDir, twist, worldPole)
-    worldPole.applyQuaternion(content.quaternion)
-    viewDir.copy(camera.position).normalize()
-    rotQ.setFromUnitVectors(worldPole, viewDir)
-    const ang = 2 * Math.acos(Math.min(1, Math.max(-1, rotQ.w)))
-    if (ang > 1e-6) axisVec.set(rotQ.x, rotQ.y, rotQ.z).setLength(ang)
-    else axisVec.set(0, 0, 0)
-    forceVec.copy(axisVec).multiplyScalar(k).addScaledVector(alignVel, -c)
-    alignVel.addScaledVector(forceVec, dt / mass)
+    const c = 2 * sim.alignDamping * Math.sqrt(k * mass)
+    if (seeking || zooming()) {
+      worldPole.copy(poleDir).normalize()
+      worldPole.applyQuaternion(content.quaternion)
+      viewDir.copy(camera.position).normalize()
+      rotQ.setFromUnitVectors(worldPole, viewDir)
+      const ang = 2 * Math.acos(Math.min(1, Math.max(-1, rotQ.w)))
+      if (ang > 1e-6) axisVec.set(rotQ.x, rotQ.y, rotQ.z).setLength(ang)
+      else axisVec.set(0, 0, 0)
+      forceVec.copy(axisVec).multiplyScalar(k).addScaledVector(alignVel, -c)
+      alignVel.addScaledVector(forceVec, dt / mass)
+    } else {
+      alignVel.addScaledVector(alignVel, (-c * dt) / mass)
+    }
   }
   applySphereSpin(dt)
-}
-
-const adoptFocus = (index: number, now = performance.now()) => {
-  if (index < 0) return
-  focusIndex = index
-  focusCandidate = index
-  focusCandidateSince = now
 }
 
 const stepFocus = (now: number) => {
@@ -493,6 +496,8 @@ const stepFocus = (now: number) => {
   }
 
   const candidate = aimed >= 0 ? aimed : center
+  if (seeking && candidate === center) return
+
   if (candidate !== focusCandidate) {
     focusCandidate = candidate
     focusCandidateSince = now
@@ -500,18 +505,7 @@ const stepFocus = (now: number) => {
 
   const stable = now - focusCandidateSince >= FOCUS_STABLE_MS
   const slow = alignVel.length() < 1.15
-  if (candidate !== focusIndex && stable && (slow || focusIndex === center)) {
-    focusIndex = candidate
-  }
-
-  if (focusIndex >= 0) poleDir.copy(marker(focusIndex).position).normalize()
-
-  if (focusIndex < 0 || focusIndex === center || !slow || !stable) return
-  worldPole.copy(poleDir).applyQuaternion(content.quaternion)
-  viewDir.copy(camera.position).normalize()
-  if (worldPole.angleTo(viewDir) < FOCUS_ARRIVE_ANG && alignVel.length() < FOCUS_ARRIVE_VEL) {
-    setSeek(focusIndex)
-  }
+  if (stable && slow) setSeek(candidate)
 }
 
 const stepPhysics = (dt: number) => {
@@ -605,16 +599,20 @@ const rebuildPoints = (n: number) => {
   center = 0
   focusIndex = 0
   focusCandidate = -1
+  seeking = true
   aimed = -1
   nextId = COUNT + 1
   alignVel.set(0, 0, 0)
   layout()
   poleDir.copy(marker(0).position).normalize()
   seek.set(readPositions())
+  prevLattice.set(seek)
   lastContentQ.copy(content.quaternion)
   lastSpiralPoints = 0
+  lastSpiralGrowth = Number.NaN
+  spiralTwist = twist
+  twistAnimT = 1
   highlightMarkers()
-  snapSpiral(poleDir, twist)
   setSpiral()
 }
 
@@ -647,6 +645,7 @@ canvas.addEventListener("pointerdown", (event) => {
 
 canvas.addEventListener("pointermove", (event) => {
   if (!dragging) return
+  if (seeking && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5) seeking = false
   rotateByPointer(event)
 })
 
@@ -660,9 +659,8 @@ canvas.addEventListener("pointerup", (event) => {
     if (index >= 0) setSeek(index)
     return
   }
+  seeking = false
   handedOff = true
-  const nearest = nearestToCrosshair()
-  if (nearest >= 0) adoptFocus(nearest)
 })
 
 canvas.addEventListener("pointercancel", () => {
@@ -691,7 +689,6 @@ const handoffPan = () => {
   alignVel.z = 0
   panVx = 0
   panVy = 0
-  if (aimed >= 0) adoptFocus(aimed)
 }
 
 canvas.addEventListener(
@@ -758,6 +755,7 @@ canvas.addEventListener(
     lastWheelMag = mag
     lastActiveWheel = now
     handedOff = false
+    seeking = false
     rotQ.setFromAxisAngle(axisVec.set(0, 1, 0), -dx * PAN_ROTATE)
     content.quaternion.premultiply(rotQ)
     rotQ.setFromAxisAngle(axisVec.set(1, 0, 0), -dy * PAN_ROTATE)
@@ -777,9 +775,9 @@ resize()
 layout()
 poleDir.copy(marker(0).position).normalize()
 seek.set(readPositions())
+prevLattice.set(seek)
 lastContentQ.copy(content.quaternion)
 highlightMarkers()
-snapSpiral(poleDir, twist)
 setSpiral()
 
 renderer.setAnimationLoop(() => {

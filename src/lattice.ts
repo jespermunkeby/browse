@@ -12,24 +12,21 @@ export const setCount = (n: number) => {
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
 
+const LOCAL_POLE = new THREE.Vector3(0, -1, 0)
 const tmp = new THREE.Vector3()
-const tmpLocal = new THREE.Vector3()
 const tmpPole = new THREE.Vector3()
 const tmpAxis = new THREE.Vector3()
 const tmpQ = new THREE.Quaternion()
 const tmpTwist = new THREE.Quaternion()
 
-/** Geometric pole of the Vogel spiral (k = -0.5). Slot 0 sits a band away. */
-export const LOCAL_TIP = new THREE.Vector3(0, -1, 0)
+export const slotRange = (growth: number) => {
+  const kMin = Math.ceil(-growth)
+  return { kMin, kMax: kMin + COUNT - 1 }
+}
 
-export const slotRange = (growth: number) => ({
-  kMin: Math.ceil(-growth - 0.5),
-  kMax: Math.floor(COUNT - growth - 0.5),
-})
-
-/** k = 0 is the first lattice point. The spiral origin is k = -0.5 (LOCAL_TIP). */
+/** k = 0 is the facing centre / spiral origin. growth pushes every slot toward the back. */
 const writeSlotCoords = (k: number, growth: number, radius: number, out: THREE.Vector3) => {
-  const y = Math.min(1, Math.max(-1, -1 + (2 * (k + growth + 0.5)) / COUNT))
+  const y = Math.min(1, Math.max(-1, -1 + (2 * (k + growth)) / COUNT))
   const r = Math.sqrt(Math.max(0, 1 - y * y)) * radius
   const theta = GOLDEN_ANGLE * k
   return out.set(Math.cos(theta) * r, y * radius, Math.sin(theta) * r)
@@ -50,20 +47,11 @@ export const writeUnitSlots = (out: Float32Array) => {
   return out
 }
 
-export const unitSlots = () => writeUnitSlots(new Float32Array(COUNT * 3))
-
 export const writeLatticePose = (pole: THREE.Vector3, twist: number, out: THREE.Quaternion) => {
-  writeSlotCoords(0, 0, 1, tmpLocal).normalize()
   tmpPole.copy(pole).normalize()
-  out.setFromUnitVectors(tmpLocal, tmpPole)
+  out.setFromUnitVectors(LOCAL_POLE, tmpPole)
   tmpTwist.setFromAxisAngle(tmpAxis.copy(tmpPole), twist)
   return out.premultiply(tmpTwist)
-}
-
-/** Content-space direction of the spiral origin for a slot-0-aligned pose. */
-export const writeTipDir = (pole: THREE.Vector3, twist: number, out: THREE.Vector3) => {
-  writeLatticePose(pole, twist, tmpQ)
-  return out.copy(LOCAL_TIP).applyQuaternion(tmpQ)
 }
 
 const pose = (pole: THREE.Vector3, twist: number) => writeLatticePose(pole, twist, tmpQ)
@@ -99,7 +87,7 @@ export const writeSlotVelocities = (
   const dy = ((2 / COUNT) * zoomVel) * SPHERE_RADIUS
   for (let i = 0; i < COUNT; i++) {
     const k = slotK[i]
-    const y = -1 + (2 * (k + growth + 0.5)) / COUNT
+    const y = -1 + (2 * (k + growth)) / COUNT
     if (y <= -1 || y >= 1) {
       out[i * 3] = 0
       out[i * 3 + 1] = 0
@@ -119,20 +107,18 @@ export const writeSlotVelocities = (
 export const SPIRAL_SEGS = 20
 export const SPIRAL_MAX_POINTS = MAX_COUNT * SPIRAL_SEGS + 1
 
-/** Writes the oriented spiral into `out` and returns the point count. */
-export const writeOrientedSpiral = (
-  pole: THREE.Vector3,
-  twist: number,
-  growth: number,
-  out: Float32Array,
-  segs = SPIRAL_SEGS,
-) => writeSpiral(pose(pole, twist), growth, out, segs)
-
-export const writeSpiral = (q: THREE.Quaternion, growth: number, out: Float32Array, segs = SPIRAL_SEGS) => {
+/** Local-space spiral (pole at -Y). Pose it with `writeLatticePose` on the object. */
+export const writeSpiral = (growth: number, out: Float32Array, segs = SPIRAL_SEGS) => {
   const { kMax } = slotRange(growth)
-  const kStart = -growth - 0.5
+  const kStart = -growth
   const steps = Math.max(1, Math.round((kMax - kStart) * segs))
   let w = 0
-  for (let i = 0; i <= steps; i++) writeOriented(kStart + i / segs, growth, SPHERE_RADIUS, q, out, w++)
+  for (let i = 0; i <= steps; i++) {
+    writeSlotCoords(kStart + i / segs, growth, SPHERE_RADIUS, tmp)
+    out[w * 3] = tmp.x
+    out[w * 3 + 1] = tmp.y
+    out[w * 3 + 2] = tmp.z
+    w++
+  }
   return w
 }
