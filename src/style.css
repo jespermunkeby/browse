@@ -17,63 +17,6 @@ body {
   height: 100%;
 }
 
-.hint {
-  position: absolute;
-  top: 16px;
-  left: 16px;
-  margin: 0;
-  color: #666;
-}
-
-.crosshair {
-  position: fixed;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  z-index: 2;
-}
-
-.crosshair-reticle {
-  width: 28px;
-  height: 28px;
-  border: 1.5px solid rgba(255, 255, 255, 0.72);
-  border-radius: 50%;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
-  position: relative;
-}
-
-.crosshair-reticle::before,
-.crosshair-reticle::after {
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  background: rgba(255, 255, 255, 0.72);
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
-}
-
-.crosshair-reticle::before {
-  width: 1px;
-  height: 12px;
-  transform: translate(-50%, -50%);
-}
-
-.crosshair-reticle::after {
-  width: 12px;
-  height: 1px;
-  transform: translate(-50%, -50%);
-}
-
-.crosshair.is-hot .crosshair-reticle {
-  border-color: #ffc14d;
-}
-
-.crosshair.is-hot .crosshair-reticle::before,
-.crosshair.is-hot .crosshair-reticle::after {
-  background: #ffc14d;
-}
-
 .tweaks {
   position: absolute;
   top: 16px;
@@ -129,4 +72,18 @@ body {
 
 .tweaks .toggle input {
   accent-color: #ffc14d;
+}
+
+.tweaks select {
+  grid-column: 1 / -1;
+  width: 100%;
+  margin: 2px 0 0;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid #2a2a2a;
+  background: #1a1a1a;
+  color: #ddd;
+  font: inherit;
+  cursor: pointer;
+  color-scheme: dark;
 }

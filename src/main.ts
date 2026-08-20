@@ -1,6 +1,5 @@
 import "./style.css"
 import * as THREE from "three"
-import { badgeTexture } from "./badge.ts"
 import {
   COUNT,
   MAX_COUNT,
@@ -24,6 +23,9 @@ const sim = {
   alignSpring: 0.8,
   alignDamping: 0.4,
   alignMass: 1.1,
+  spiralSpring: 0.55,
+  spiralDamping: 0.45,
+  spiralMass: 1,
   zoom: 0.028,
   zoomDamp: 2.8,
   zoomHandoff: 4.6,
@@ -36,27 +38,53 @@ const tweakFields: { key: keyof typeof sim; label: string; min: number; max: num
   { key: "alignSpring", label: "Align spring", min: 0, max: 1.5, step: 0.05 },
   { key: "alignDamping", label: "Align damping", min: 0.05, max: 1.4, step: 0.05 },
   { key: "alignMass", label: "Align mass", min: 0.2, max: 4, step: 0.1 },
+  { key: "spiralSpring", label: "Spiral spring", min: 0, max: 1.5, step: 0.05 },
+  { key: "spiralDamping", label: "Spiral damping", min: 0.05, max: 1.4, step: 0.05 },
+  { key: "spiralMass", label: "Spiral mass", min: 0.2, max: 4, step: 0.1 },
   { key: "zoom", label: "Zoom speed", min: 0.002, max: 0.05, step: 0.002 },
   { key: "zoomDamp", label: "Zoom damp", min: 0.4, max: 10, step: 0.2 },
   { key: "zoomHandoff", label: "Zoom handoff", min: 0, max: 10, step: 0.1 },
 ]
 
-const CROSSHAIR_PX = 14
+const PICK_PX = 16
 const PAN_ROTATE = 0.0024
 const PAN_HANDOFF_MS = 140
 const PAN_VEL_SMOOTH = 0.38
 const FOCUS_STABLE_MS = 160
 const ZOOM_LOCK_MS = 260
 const PAN_CLASSIFY_MS = 70
-const SPIRAL_ANIM_MS = 480
+const FRAME = 1.12
+const BORDER_PX = 1.5
+const DOT_RADIUS_PX = 2.7
 
 const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!
-const crosshair = document.querySelector<HTMLElement>(".crosshair")!
 const tweaks = document.querySelector<HTMLElement>("#tweaks")!
 
-let showSpiral = true
+type ProjectionId = "stereo" | "area" | "equidistant" | "ortho"
+
+const projections: { id: ProjectionId; label: string }[] = [
+  { id: "stereo", label: "Stereographic" },
+  { id: "area", label: "Equal-area" },
+  { id: "equidistant", label: "Equidistant" },
+  { id: "ortho", label: "Orthographic" },
+]
+
+let showSpiral = false
+let projection: ProjectionId = "stereo"
 
 const formatTweak = (value: number, step: number) => value.toFixed(step < 0.01 ? 3 : step < 0.1 ? 2 : 1)
+
+const projectionLabel = document.createElement("label")
+const projectionSelect = document.createElement("select")
+for (const option of projections) {
+  const el = document.createElement("option")
+  el.value = option.id
+  el.textContent = option.label
+  projectionSelect.append(el)
+}
+projectionSelect.value = projection
+projectionLabel.append(Object.assign(document.createElement("span"), { textContent: "Projection" }), projectionSelect)
+tweaks.append(projectionLabel)
 
 const spiralToggle = document.createElement("label")
 spiralToggle.className = "toggle"
@@ -102,25 +130,40 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
 const scene = new THREE.Scene()
 scene.background = new THREE.Color(0x111111)
 
-const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100)
-camera.position.set(0, 0, 3.2)
-
-scene.add(new THREE.AmbientLight(0xffffff, 0.55))
-const light = new THREE.DirectionalLight(0xffffff, 0.9)
-light.position.set(2, 2, 3)
-scene.add(light)
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -10, 10)
+camera.position.set(0, 0, 5)
 
 const content = new THREE.Group()
 scene.add(content)
-content.add(
-  new THREE.Mesh(
-    new THREE.SphereGeometry(1, 48, 32),
-    new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.85 }),
-  ),
-)
 
 const markers = new THREE.Group()
 content.add(markers)
+
+const dummy = new THREE.Object3D()
+const disk = new THREE.Mesh(
+  new THREE.CircleGeometry(1, 256),
+  new THREE.MeshBasicMaterial({ color: 0x161616, depthTest: false }),
+)
+disk.frustumCulled = false
+disk.renderOrder = 0
+scene.add(disk)
+
+const rim = new THREE.Mesh(
+  new THREE.RingGeometry(0.99, 1, 256),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, depthTest: false }),
+)
+rim.frustumCulled = false
+rim.renderOrder = 1
+scene.add(rim)
+
+const dots = new THREE.InstancedMesh(
+  new THREE.CircleGeometry(1, 28),
+  new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }),
+  MAX_COUNT,
+)
+dots.frustumCulled = false
+dots.renderOrder = 3
+scene.add(dots)
 
 const spiralGeometry = new THREE.BufferGeometry()
 const spiral = new THREE.Line(
@@ -128,20 +171,27 @@ const spiral = new THREE.Line(
   new THREE.LineBasicMaterial({
     vertexColors: true,
     transparent: true,
-    opacity: 0.95,
+    opacity: 0.55,
     depthTest: false,
     depthWrite: false,
   }),
 )
 spiral.frustumCulled = false
 spiral.renderOrder = 2
-// World-space, locked to the view axis — not a child of the rotating globe.
+spiral.visible = false
 scene.add(spiral)
+
+let diskPx = 1
+let dotRadius = 0.02
 
 spiralCheck.addEventListener("change", () => {
   showSpiral = spiralCheck.checked
   spiral.visible = showSpiral
   if (showSpiral) setSpiral()
+})
+
+projectionSelect.addEventListener("change", () => {
+  projection = projectionSelect.value as ProjectionId
 })
 
 const pickWorld = new THREE.Vector3()
@@ -150,15 +200,19 @@ const axisVec = new THREE.Vector3()
 const forceVec = new THREE.Vector3()
 const velVec = new THREE.Vector3()
 const omega = new THREE.Vector3()
-const viewDir = new THREE.Vector3()
+const viewDir = new THREE.Vector3(0, 0, 1)
 const worldPole = new THREE.Vector3()
 const ndc = new THREE.Vector2()
+const plane = new THREE.Vector2()
 const prevHit = new THREE.Vector3()
 const currHit = new THREE.Vector3()
 const rotQ = new THREE.Quaternion()
 const alignQ = new THREE.Quaternion()
 const lastContentQ = new THREE.Quaternion()
 const invQ = new THREE.Quaternion()
+const poseNow = new THREE.Quaternion()
+const poseTarget = new THREE.Quaternion()
+const poseVel = new THREE.Vector3()
 const alignVel = new THREE.Vector3()
 
 const positions = new Float32Array(MAX_COUNT * 3)
@@ -173,15 +227,14 @@ const ahead: number[] = []
 const occupied = new Uint8Array(MAX_COUNT + 2)
 const entering = new Int32Array(MAX_COUNT)
 const poleDir = new THREE.Vector3(0, -1, 0)
+const centerDir = new THREE.Vector3(0, 0, 1)
+const spiralLocal = new Float32Array(SPIRAL_MAX_POINTS * 3)
 const spiralPos = new Float32Array(SPIRAL_MAX_POINTS * 3)
 const spiralCol = new Float32Array(SPIRAL_MAX_POINTS * 3)
 let growth = 0
 let zoomVel = 0
 let center = 0
 let twist = 0
-let spiralTwist = 0
-let twistFrom = 0
-let twistTo = 0
 let nextId = COUNT + 1
 let aimed = -1
 let lastTime = performance.now()
@@ -198,16 +251,92 @@ let panVx = 0
 let panVy = 0
 let handedOff = true
 let seeking = true
-let focusIndex = 0
 let focusCandidate = -1
 let focusCandidateSince = 0
 let spiralReady = false
 let lastSpiralGrowth = Number.NaN
-let lastSpiralPoints = 0
-let twistAnimT = 1
-let twistAnimAt = 0
+let lastSpiralLocalCount = 0
 
-const marker = (i: number) => markers.children[i] as THREE.Sprite
+const marker = (i: number) => markers.children[i]
+
+/** Map a unit vector on the front hemisphere into the unit disk. */
+const projectHemisphere = (x: number, y: number, z: number, out: THREE.Vector3) => {
+  switch (projection) {
+    case "stereo": {
+      const inv = 1 / (1 + z)
+      return out.set(x * inv, y * inv, 0)
+    }
+    case "area": {
+      const inv = 1 / Math.sqrt(1 + z)
+      return out.set(x * inv, y * inv, 0)
+    }
+    case "equidistant": {
+      const s = Math.hypot(x, y)
+      if (s < 1e-12) return out.set(0, 0, 0)
+      const r = (2 / Math.PI) * Math.acos(Math.min(1, z))
+      return out.set((x * r) / s, (y * r) / s, 0)
+    }
+    case "ortho":
+      return out.set(x, y, 0)
+  }
+}
+
+/** Inverse of `projectHemisphere`. `(px, py)` is already clamped to the unit disk. */
+const unprojectDisk = (px: number, py: number, out: THREE.Vector3) => {
+  const rho2 = px * px + py * py
+  switch (projection) {
+    case "stereo": {
+      const d = 1 + rho2
+      return out.set((2 * px) / d, (2 * py) / d, (1 - rho2) / d)
+    }
+    case "area": {
+      const s = Math.sqrt(Math.max(0, 2 - rho2))
+      return out.set(px * s, py * s, 1 - rho2)
+    }
+    case "equidistant": {
+      const rho = Math.sqrt(rho2)
+      if (rho < 1e-12) return out.set(0, 0, 1)
+      const theta = rho * Math.PI * 0.5
+      const s = Math.sin(theta) / rho
+      return out.set(px * s, py * s, Math.cos(theta))
+    }
+    case "ortho":
+      return out.set(px, py, Math.sqrt(Math.max(0, 1 - rho2)))
+  }
+}
+
+const projectPoint = (local: THREE.Vector3, out: THREE.Vector3) => {
+  out.copy(local).applyQuaternion(content.quaternion).normalize()
+  if (out.z < 0) return false
+  projectHemisphere(out.x, out.y, out.z, out)
+  return true
+}
+
+const screenToPlane = (sx: number, sy: number, out: THREE.Vector2) => {
+  const x = (sx / canvas.clientWidth) * 2 - 1
+  const y = -(sy / canvas.clientHeight) * 2 + 1
+  out.set(
+    camera.left + (x * 0.5 + 0.5) * (camera.right - camera.left),
+    camera.bottom + (y * 0.5 + 0.5) * (camera.top - camera.bottom),
+  )
+  return out
+}
+
+const projectDots = () => {
+  dots.count = COUNT
+  for (let i = 0; i < COUNT; i++) {
+    if (projectPoint(marker(i).position, pickWorld)) {
+      dummy.position.copy(pickWorld)
+      dummy.scale.setScalar(dotRadius)
+    } else {
+      dummy.position.set(0, 0, 0)
+      dummy.scale.setScalar(0)
+    }
+    dummy.updateMatrix()
+    dots.setMatrixAt(i, dummy.matrix)
+  }
+  dots.instanceMatrix.needsUpdate = true
+}
 
 const readPositions = () => {
   for (let i = 0; i < COUNT; i++) {
@@ -234,80 +363,97 @@ const resetZoomWindow = () => {
   for (let i = 0; i < COUNT; i++) nextId = Math.max(nextId, numbers[i] + 1)
 }
 
-const highlightMarkers = () => {
-  for (let i = 0; i < COUNT; i++) {
-    marker(i).material.color.set(i === center ? 0xffc14d : i === aimed ? 0x9ad1ff : 0xffffff)
-  }
-  crosshair.classList.toggle("is-hot", aimed >= 0 && aimed !== center)
-}
-
 const TAU = Math.PI * 2
-const wrapPi = (a: number) => ((a + Math.PI) % TAU + TAU) % TAU - Math.PI
-const easeTwist = (t: number) => 1 - (1 - t) ** 3
 
-const beginTwist = (next: number) => {
-  twist = ((next % TAU) + TAU) % TAU
-  const delta = wrapPi(twist - spiralTwist)
-  if (Math.abs(delta) < 1e-4) {
-    spiralTwist = twist
-    twistAnimT = 1
-    return
-  }
-  twistFrom = spiralTwist
-  twistTo = spiralTwist + delta
-  twistAnimT = 0
-  twistAnimAt = performance.now()
-}
-
-const setSpiral = (now = performance.now()) => {
+const setSpiral = () => {
   if (!showSpiral) return
 
-  if (twistAnimT < 1) {
-    twistAnimT = Math.min(1, (now - twistAnimAt) / SPIRAL_ANIM_MS)
-    spiralTwist = twistFrom + (twistTo - twistFrom) * easeTwist(twistAnimT)
-    if (twistAnimT >= 1) spiralTwist = twist
-  }
-
-  writeLatticePose(viewDir.copy(camera.position).normalize(), spiralTwist, spiral.quaternion)
-
-  if (spiralReady && growth === lastSpiralGrowth) return
-
-  const points = writeSpiral(growth, spiralPos)
-  if (!spiralReady) {
-    spiralGeometry.setAttribute("position", new THREE.BufferAttribute(spiralPos, 3))
-    spiralGeometry.setAttribute("color", new THREE.BufferAttribute(spiralCol, 3))
-    spiralReady = true
-  } else {
-    spiralGeometry.getAttribute("position").needsUpdate = true
-  }
-  if (points !== lastSpiralPoints) {
-    const fadeDen = Math.max(points - 1, 1)
-    for (let i = 0; i < points; i++) {
-      const fade = 0.28 + 0.72 * (1 - i / fadeDen)
+  if (!spiralReady || growth !== lastSpiralGrowth) {
+    lastSpiralLocalCount = writeSpiral(growth, spiralLocal)
+    lastSpiralGrowth = growth
+    if (!spiralReady) {
+      spiralGeometry.setAttribute("position", new THREE.BufferAttribute(spiralPos, 3))
+      spiralGeometry.setAttribute("color", new THREE.BufferAttribute(spiralCol, 3))
+      spiralReady = true
+    }
+    const fadeDen = Math.max(lastSpiralLocalCount - 1, 1)
+    for (let i = 0; i < lastSpiralLocalCount; i++) {
+      const fade = 0.12 + 0.38 * (1 - i / fadeDen)
       spiralCol[i * 3] = fade
-      spiralCol[i * 3 + 1] = 0.757 * fade
-      spiralCol[i * 3 + 2] = 0.302 * fade
+      spiralCol[i * 3 + 1] = fade
+      spiralCol[i * 3 + 2] = fade
     }
     spiralGeometry.getAttribute("color").needsUpdate = true
-    lastSpiralPoints = points
   }
-  spiralGeometry.setDrawRange(0, points)
-  lastSpiralGrowth = growth
+
+  for (let i = 0; i < lastSpiralLocalCount; i++) {
+    const p = i * 3
+    pickWorld.set(spiralLocal[p], spiralLocal[p + 1], spiralLocal[p + 2]).applyQuaternion(poseNow)
+    pickWorld.applyQuaternion(content.quaternion).normalize()
+    if (pickWorld.z < 0) {
+      spiralPos[p] = Number.NaN
+      spiralPos[p + 1] = Number.NaN
+      spiralPos[p + 2] = Number.NaN
+      continue
+    }
+    projectHemisphere(pickWorld.x, pickWorld.y, pickWorld.z, pickWorld)
+    spiralPos[p] = pickWorld.x
+    spiralPos[p + 1] = pickWorld.y
+    spiralPos[p + 2] = 0
+  }
+
+  spiralGeometry.getAttribute("position").needsUpdate = true
+  spiralGeometry.setDrawRange(0, lastSpiralLocalCount)
+}
+
+const stepSpiralPose = (dt: number) => {
+  centerDir.set(0, 0, 1).applyQuaternion(invQ.copy(content.quaternion).invert()).normalize()
+  writeLatticePose(poleDir, twist, poseTarget)
+  rotQ.setFromUnitVectors(worldPole.copy(poleDir).normalize(), centerDir)
+  poseTarget.premultiply(rotQ)
+
+  const k = sim.spiralSpring * 12
+  if (k <= 0) {
+    poseNow.copy(poseTarget)
+    poseVel.set(0, 0, 0)
+    return
+  }
+
+  invQ.copy(poseNow).invert()
+  rotQ.copy(poseTarget).multiply(invQ)
+  if (rotQ.w < 0) {
+    rotQ.x = -rotQ.x
+    rotQ.y = -rotQ.y
+    rotQ.z = -rotQ.z
+    rotQ.w = -rotQ.w
+  }
+  const ang = 2 * Math.acos(Math.min(1, Math.max(-1, rotQ.w)))
+  if (ang > 1e-6) axisVec.set(rotQ.x, rotQ.y, rotQ.z).setLength(ang)
+  else axisVec.set(0, 0, 0)
+
+  const mass = Math.max(0.05, sim.spiralMass)
+  const c = 2 * sim.spiralDamping * Math.sqrt(k * mass)
+  forceVec.copy(axisVec).multiplyScalar(k).addScaledVector(poseVel, -c)
+  poseVel.addScaledVector(forceVec, dt / mass)
+
+  const step = poseVel.length() * dt
+  if (step > 1e-8) {
+    alignQ.setFromAxisAngle(axisVec.copy(poseVel).normalize(), step)
+    poseNow.premultiply(alignQ).normalize()
+  }
 }
 
 const setSeek = (index: number) => {
   const assignment = reassign(readPositions(), index)
   seek.set(assignment.targets)
   center = index
-  focusIndex = index
   focusCandidate = index
   poleDir.copy(marker(index).position).normalize()
   slotK.set(assignment.ranks)
   resetZoomWindow()
-  highlightMarkers()
   prevLattice.set(assignment.targets)
   seeking = true
-  beginTwist(assignment.twist)
+  twist = ((assignment.twist % TAU) + TAU) % TAU
 }
 
 const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
@@ -315,8 +461,6 @@ const zooming = (now = performance.now()) => Math.abs(zoomVel) > sim.zoomHandoff
 
 const setNumber = (index: number, n: number) => {
   numbers[index] = n
-  marker(index).material.map = badgeTexture(n)
-  marker(index).material.needsUpdate = true
 }
 
 const takeId = (stack: number[]) => stack.pop() ?? nextId++
@@ -379,10 +523,7 @@ const kickZoom = (impulse: number) => {
   if (impulse === 0) return
   if (!zooming()) {
     captureLattice()
-    focusIndex = center
     focusCandidate = center
-    spiralTwist = twist
-    twistAnimT = 1
   }
   zoomVel += impulse
 }
@@ -394,9 +535,7 @@ const handoffZoom = () => {
   writeSlotVelocities(slotK, growth, poleDir, twist, zoomVel, velocity)
   zoomVel = 0
   center = polePoint()
-  focusIndex = center
   focusCandidate = center
-  highlightMarkers()
 }
 
 const stepZoom = (dt: number) => {
@@ -412,8 +551,7 @@ const stepZoom = (dt: number) => {
   const nextCenter = polePoint()
   if (nextCenter !== center) {
     center = nextCenter
-    focusIndex = nextCenter
-    highlightMarkers()
+    focusCandidate = nextCenter
   }
   if (!zooming()) {
     handoffZoom()
@@ -428,13 +566,16 @@ const pointerNdc = (event: PointerEvent) => {
   return ndc
 }
 
-const ndcToBall = (x: number, y: number, out: THREE.Vector3) => {
-  const d = x * x + y * y
-  if (d > 1) {
-    const inv = 1 / Math.sqrt(d)
-    return out.set(x * inv, y * inv, 0)
+const ndcToHemisphere = (x: number, y: number, out: THREE.Vector3) => {
+  let px = camera.left + (x * 0.5 + 0.5) * (camera.right - camera.left)
+  let py = camera.bottom + (y * 0.5 + 0.5) * (camera.top - camera.bottom)
+  const r2 = px * px + py * py
+  if (r2 > 1) {
+    const inv = 1 / Math.sqrt(r2)
+    px *= inv
+    py *= inv
   }
-  return out.set(x, y, Math.sqrt(1 - d))
+  return unprojectDisk(px, py, out)
 }
 
 const readContentDelta = () => {
@@ -475,7 +616,7 @@ const autoAlign = (dt: number) => {
     if (seeking || zooming()) {
       worldPole.copy(poleDir).normalize()
       worldPole.applyQuaternion(content.quaternion)
-      viewDir.copy(camera.position).normalize()
+      viewDir.set(0, 0, 1)
       rotQ.setFromUnitVectors(worldPole, viewDir)
       const ang = 2 * Math.acos(Math.min(1, Math.max(-1, rotQ.w)))
       if (ang > 1e-6) axisVec.set(rotQ.x, rotQ.y, rotQ.z).setLength(ang)
@@ -539,17 +680,10 @@ const stepPhysics = (dt: number) => {
 const pickIndexAt = (sx: number, sy: number, radiusPx: number) => {
   let best = -1
   let bestDist = radiusPx
-  const w = canvas.clientWidth
-  const h = canvas.clientHeight
-  content.updateWorldMatrix(true, true)
+  screenToPlane(sx, sy, plane)
   for (let i = 0; i < COUNT; i++) {
-    pickWorld.copy(marker(i).position).applyMatrix4(content.matrixWorld)
-    if (pickWorld.dot(camera.position) <= 0) continue
-    pickWorld.project(camera)
-    if (pickWorld.z < -1 || pickWorld.z > 1) continue
-    const x = (pickWorld.x * 0.5 + 0.5) * w
-    const y = (-pickWorld.y * 0.5 + 0.5) * h
-    const dist = Math.hypot(x - sx, y - sy)
+    if (!projectPoint(marker(i).position, pickWorld)) continue
+    const dist = Math.hypot(pickWorld.x - plane.x, pickWorld.y - plane.y) * diskPx
     if (dist < bestDist) {
       bestDist = dist
       best = i
@@ -558,29 +692,21 @@ const pickIndexAt = (sx: number, sy: number, radiusPx: number) => {
   return best
 }
 
-const nearestToCrosshair = () => pickIndexAt(canvas.clientWidth * 0.5, canvas.clientHeight * 0.5, Infinity)
+const nearestToCenter = () => pickIndexAt(canvas.clientWidth * 0.5, canvas.clientHeight * 0.5, Infinity)
 
 const clearMarkers = () => {
-  for (let i = markers.children.length - 1; i >= 0; i--) {
-    const sprite = markers.children[i] as THREE.Sprite
-    sprite.material.dispose()
-    markers.remove(sprite)
-  }
+  for (let i = markers.children.length - 1; i >= 0; i--) markers.remove(markers.children[i])
 }
 
 const layout = () => {
-  const scale = Math.max(0.04, 0.34 / Math.sqrt(COUNT))
   for (let i = 0; i < COUNT; i++) {
-    const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ transparent: true }))
-    sprite.userData.index = i
+    const node = new THREE.Object3D()
+    node.userData.index = i
     numbers[i] = i + 1
     slotK[i] = i
-    sprite.material.map = badgeTexture(numbers[i])
-    sprite.material.needsUpdate = true
-    sprite.scale.setScalar(scale)
     const point = slotPoint(i, 0)
-    sprite.position.set(point[0], point[1], point[2])
-    markers.add(sprite)
+    node.position.set(point[0], point[1], point[2])
+    markers.add(node)
   }
 }
 
@@ -597,7 +723,6 @@ const rebuildPoints = (n: number) => {
   zoomVel = 0
   twist = 0
   center = 0
-  focusIndex = 0
   focusCandidate = -1
   seeking = true
   aimed = -1
@@ -605,28 +730,45 @@ const rebuildPoints = (n: number) => {
   alignVel.set(0, 0, 0)
   layout()
   poleDir.copy(marker(0).position).normalize()
+  writeLatticePose(poleDir, twist, poseNow)
+  poseVel.set(0, 0, 0)
   seek.set(readPositions())
   prevLattice.set(seek)
   lastContentQ.copy(content.quaternion)
-  lastSpiralPoints = 0
   lastSpiralGrowth = Number.NaN
-  spiralTwist = twist
-  twistAnimT = 1
-  highlightMarkers()
+  lastSpiralLocalCount = 0
   setSpiral()
 }
 
 pointsInput.addEventListener("input", () => rebuildPoints(Number(pointsInput.value)))
 
 const resize = () => {
-  camera.aspect = innerWidth / innerHeight
+  const w = innerWidth
+  const h = innerHeight
+  const aspect = w / Math.max(h, 1)
+  if (aspect >= 1) {
+    camera.left = -FRAME * aspect
+    camera.right = FRAME * aspect
+    camera.top = FRAME
+    camera.bottom = -FRAME
+  } else {
+    camera.left = -FRAME
+    camera.right = FRAME
+    camera.top = FRAME / aspect
+    camera.bottom = -FRAME / aspect
+  }
   camera.updateProjectionMatrix()
-  renderer.setSize(innerWidth, innerHeight, false)
+  renderer.setSize(w, h, false)
+  diskPx = Math.min(w, h) / (2 * FRAME)
+  dotRadius = DOT_RADIUS_PX / diskPx
+  const border = Math.max(BORDER_PX / diskPx, 0.0015)
+  rim.geometry.dispose()
+  rim.geometry = new THREE.RingGeometry(1 - border, 1, 256)
 }
 
 const rotateByPointer = (event: PointerEvent) => {
   pointerNdc(event)
-  ndcToBall(ndc.x, ndc.y, currHit)
+  ndcToHemisphere(ndc.x, ndc.y, currHit)
   if (prevHit.dot(currHit) < 0.999999) {
     rotQ.setFromUnitVectors(prevHit, currHit)
     content.quaternion.premultiply(rotQ)
@@ -638,7 +780,7 @@ canvas.addEventListener("pointerdown", (event) => {
   pointerDown = { x: event.clientX, y: event.clientY }
   dragging = true
   pointerNdc(event)
-  ndcToBall(ndc.x, ndc.y, prevHit)
+  ndcToHemisphere(ndc.x, ndc.y, prevHit)
   lastContentQ.copy(content.quaternion)
   canvas.setPointerCapture(event.pointerId)
 })
@@ -655,7 +797,7 @@ canvas.addEventListener("pointerup", (event) => {
   const dragged = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5
   if (!dragged) {
     const rect = canvas.getBoundingClientRect()
-    const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, CROSSHAIR_PX)
+    const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, PICK_PX)
     if (index >= 0) setSeek(index)
     return
   }
@@ -774,10 +916,11 @@ addEventListener("resize", resize)
 resize()
 layout()
 poleDir.copy(marker(0).position).normalize()
+writeLatticePose(poleDir, twist, poseNow)
+poseVel.set(0, 0, 0)
 seek.set(readPositions())
 prevLattice.set(seek)
 lastContentQ.copy(content.quaternion)
-highlightMarkers()
 setSpiral()
 
 renderer.setAnimationLoop(() => {
@@ -785,11 +928,7 @@ renderer.setAnimationLoop(() => {
   const dt = Math.min(0.05, (now - lastTime) / 1000)
   lastTime = now
 
-  const nextAimed = nearestToCrosshair()
-  if (nextAimed !== aimed) {
-    aimed = nextAimed
-    highlightMarkers()
-  }
+  aimed = nearestToCenter()
 
   if (!dragging && !handedOff && now - lastActiveWheel > PAN_HANDOFF_MS) handoffPan()
   stepFocus(now)
@@ -815,6 +954,8 @@ renderer.setAnimationLoop(() => {
     stepPhysics(dt)
   }
 
-  setSpiral(now)
+  stepSpiralPose(dt)
+  setSpiral()
+  projectDots()
   renderer.render(scene, camera)
 })
