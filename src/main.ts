@@ -3,7 +3,6 @@ import * as THREE from "three"
 import {
   COUNT,
   MAX_COUNT,
-  MIN_COUNT,
   SPHERE_RADIUS,
   SPIRAL_MAX_POINTS,
   setCount,
@@ -15,6 +14,17 @@ import {
   writeSlotVelocities,
 } from "./lattice.ts"
 import { reassign } from "./assign.ts"
+import {
+  DEFAULT_SETTINGS,
+  MAX_PALETTE,
+  MODES,
+  formatCoarseness,
+  settingsJson,
+  type ModeId,
+  type Settings,
+} from "./dither/settings.ts"
+import { createDitherPass } from "./dither/pass.ts"
+import { disposePhoto, photoFromFile, photoSize, type Photo } from "./photos.ts"
 
 const sim = {
   spring: 0.2,
@@ -46,7 +56,7 @@ const tweakFields: { key: keyof typeof sim; label: string; min: number; max: num
   { key: "zoomHandoff", label: "Zoom handoff", min: 0, max: 10, step: 0.1 },
 ]
 
-const PICK_PX = 16
+const PICK_PAD = 4
 const PAN_ROTATE = 0.0024
 const PAN_HANDOFF_MS = 140
 const PAN_VEL_SMOOTH = 0.38
@@ -54,11 +64,34 @@ const FOCUS_STABLE_MS = 160
 const ZOOM_LOCK_MS = 260
 const PAN_CLASSIFY_MS = 70
 const FRAME = 1.12
-const BORDER_PX = 1.5
-const DOT_RADIUS_PX = 2.7
 
 const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!
 const tweaks = document.querySelector<HTMLElement>("#tweaks")!
+const motion = document.querySelector<HTMLElement>("#motion")!
+const empty = document.querySelector<HTMLElement>("#empty")!
+const addBtn = document.querySelector<HTMLElement>("#addBtn")!
+const settingsBtn = document.querySelector<HTMLButtonElement>("#settingsBtn")!
+const settingsClose = document.querySelector<HTMLButtonElement>("#settingsClose")!
+const fileInput = document.querySelector<HTMLInputElement>("#file")!
+const addMore = document.querySelector<HTMLButtonElement>("#addMore")!
+const clearImages = document.querySelector<HTMLButtonElement>("#clearImages")!
+const imageCount = document.querySelector<HTMLElement>("#imageCount")!
+const paletteEl = document.querySelector<HTMLElement>("#palette")!
+const addColor = document.querySelector<HTMLButtonElement>("#addColor")!
+const modeSelect = document.querySelector<HTMLSelectElement>("#mode")!
+const coarsenessInput = document.querySelector<HTMLInputElement>("#coarseness")!
+const coarsenessVal = document.querySelector<HTMLElement>("#coarsenessVal")!
+const copySettings = document.querySelector<HTMLButtonElement>("#copySettings")!
+const projectionSelect = document.querySelector<HTMLSelectElement>("#projection")!
+const spiralCheck = document.querySelector<HTMLInputElement>("#spiral")!
+const imageAreaInput = document.querySelector<HTMLInputElement>("#imageArea")!
+const areaVal = document.querySelector<HTMLElement>("#areaVal")!
+const vignetteRadiusInput = document.querySelector<HTMLInputElement>("#vignetteRadius")!
+const vigRadiusVal = document.querySelector<HTMLElement>("#vigRadiusVal")!
+const vignetteSoftnessInput = document.querySelector<HTMLInputElement>("#vignetteSoftness")!
+const vigSoftVal = document.querySelector<HTMLElement>("#vigSoftVal")!
+const vignetteStrengthInput = document.querySelector<HTMLInputElement>("#vignetteStrength")!
+const vigStrVal = document.querySelector<HTMLElement>("#vigStrVal")!
 
 type ProjectionId = "stereo" | "area" | "equidistant" | "ortho"
 
@@ -69,13 +102,26 @@ const projections: { id: ProjectionId; label: string }[] = [
   { id: "ortho", label: "Orthographic" },
 ]
 
+const settings: Settings = {
+  ...DEFAULT_SETTINGS,
+  colors: [...DEFAULT_SETTINGS.colors],
+}
+const photos: Photo[] = []
+
 let showSpiral = false
 let projection: ProjectionId = "stereo"
 
 const formatTweak = (value: number, step: number) => value.toFixed(step < 0.01 ? 3 : step < 0.1 ? 2 : 1)
 
-const projectionLabel = document.createElement("label")
-const projectionSelect = document.createElement("select")
+const setSettingsOpen = (open: boolean) => {
+  tweaks.hidden = !open
+  settingsBtn.hidden = open
+  settingsBtn.setAttribute("aria-expanded", String(open))
+}
+
+settingsBtn.addEventListener("click", () => setSettingsOpen(true))
+settingsClose.addEventListener("click", () => setSettingsOpen(false))
+
 for (const option of projections) {
   const el = document.createElement("option")
   el.value = option.id
@@ -83,28 +129,21 @@ for (const option of projections) {
   projectionSelect.append(el)
 }
 projectionSelect.value = projection
-projectionLabel.append(Object.assign(document.createElement("span"), { textContent: "Projection" }), projectionSelect)
-tweaks.append(projectionLabel)
 
-const spiralToggle = document.createElement("label")
-spiralToggle.className = "toggle"
-const spiralCheck = document.createElement("input")
-spiralCheck.type = "checkbox"
+for (const item of MODES) {
+  const el = document.createElement("option")
+  el.value = item.id
+  el.textContent = item.label
+  modeSelect.append(el)
+}
+modeSelect.value = settings.mode
+coarsenessInput.value = String(Math.round(Math.log2(settings.coarseness)))
+imageAreaInput.value = String(settings.imageArea)
+vignetteRadiusInput.value = String(settings.vignetteRadius)
+vignetteSoftnessInput.value = String(settings.vignetteSoftness)
+vignetteStrengthInput.value = String(settings.vignetteStrength)
+
 spiralCheck.checked = showSpiral
-spiralToggle.append(spiralCheck, Object.assign(document.createElement("span"), { textContent: "Show spiral" }))
-tweaks.append(spiralToggle)
-
-const pointsLabel = document.createElement("label")
-const pointsValue = document.createElement("span")
-pointsValue.textContent = String(COUNT)
-const pointsInput = document.createElement("input")
-pointsInput.type = "range"
-pointsInput.min = String(MIN_COUNT)
-pointsInput.max = String(MAX_COUNT)
-pointsInput.step = "1"
-pointsInput.value = String(COUNT)
-pointsLabel.append(Object.assign(document.createElement("span"), { textContent: "Points" }), pointsValue, pointsInput)
-tweaks.append(pointsLabel)
 
 for (const field of tweakFields) {
   const label = document.createElement("label")
@@ -121,17 +160,21 @@ for (const field of tweakFields) {
     value.textContent = formatTweak(sim[field.key], field.step)
   })
   label.append(Object.assign(document.createElement("span"), { textContent: field.label }), value, input)
-  tweaks.append(label)
+  motion.append(label)
 }
 
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true })
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
+renderer.setPixelRatio(1)
+renderer.outputColorSpace = THREE.SRGBColorSpace
+renderer.setClearColor(0x000000, 1)
 
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0x111111)
+scene.background = new THREE.Color(0x000000)
 
-const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, -10, 10)
+const camera = new THREE.OrthographicCamera(-FRAME, FRAME, FRAME, -FRAME, -10, 10)
 camera.position.set(0, 0, 5)
+
+const ditherPass = createDitherPass(renderer)
 
 const content = new THREE.Group()
 scene.add(content)
@@ -139,31 +182,19 @@ scene.add(content)
 const markers = new THREE.Group()
 content.add(markers)
 
-const dummy = new THREE.Object3D()
-const disk = new THREE.Mesh(
-  new THREE.CircleGeometry(1, 256),
-  new THREE.MeshBasicMaterial({ color: 0x161616, depthTest: false }),
-)
-disk.frustumCulled = false
-disk.renderOrder = 0
-scene.add(disk)
-
-const rim = new THREE.Mesh(
-  new THREE.RingGeometry(0.99, 1, 256),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide, depthTest: false }),
-)
-rim.frustumCulled = false
-rim.renderOrder = 1
-scene.add(rim)
-
-const dots = new THREE.InstancedMesh(
-  new THREE.CircleGeometry(1, 28),
-  new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }),
-  MAX_COUNT,
-)
-dots.frustumCulled = false
-dots.renderOrder = 3
-scene.add(dots)
+const thumbGeo = new THREE.PlaneGeometry(1, 1)
+const thumbs: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
+for (let i = 0; i < MAX_COUNT; i++) {
+  const mesh = new THREE.Mesh(
+    thumbGeo,
+    new THREE.MeshBasicMaterial({ depthTest: false, toneMapped: false }),
+  )
+  mesh.frustumCulled = false
+  mesh.renderOrder = 3
+  mesh.visible = false
+  scene.add(mesh)
+  thumbs.push(mesh)
+}
 
 const spiralGeometry = new THREE.BufferGeometry()
 const spiral = new THREE.Line(
@@ -174,6 +205,7 @@ const spiral = new THREE.Line(
     opacity: 0.55,
     depthTest: false,
     depthWrite: false,
+    toneMapped: false,
   }),
 )
 spiral.frustumCulled = false
@@ -182,7 +214,6 @@ spiral.visible = false
 scene.add(spiral)
 
 let diskPx = 1
-let dotRadius = 0.02
 
 spiralCheck.addEventListener("change", () => {
   showSpiral = spiralCheck.checked
@@ -221,7 +252,7 @@ const seek = new Float32Array(MAX_COUNT * 3)
 const prevLattice = new Float32Array(MAX_COUNT * 3)
 const remapped = new Uint8Array(MAX_COUNT)
 const slotK = new Int32Array(MAX_COUNT)
-const numbers = new Int32Array(MAX_COUNT)
+const imageIds = new Int32Array(MAX_COUNT)
 const behind: number[] = []
 const ahead: number[] = []
 const occupied = new Uint8Array(MAX_COUNT + 2)
@@ -235,7 +266,6 @@ let growth = 0
 let zoomVel = 0
 let center = 0
 let twist = 0
-let nextId = COUNT + 1
 let aimed = -1
 let lastTime = performance.now()
 let pointerDown = { x: 0, y: 0 }
@@ -322,20 +352,30 @@ const screenToPlane = (sx: number, sy: number, out: THREE.Vector2) => {
   return out
 }
 
-const projectDots = () => {
-  dots.count = COUNT
-  for (let i = 0; i < COUNT; i++) {
-    if (projectPoint(marker(i).position, pickWorld)) {
-      dummy.position.copy(pickWorld)
-      dummy.scale.setScalar(dotRadius)
-    } else {
-      dummy.position.set(0, 0, 0)
-      dummy.scale.setScalar(0)
+const thumbSize = (photo: Photo) => photoSize(photo.aspect, settings.imageArea)
+
+const projectThumbs = () => {
+  for (let i = 0; i < MAX_COUNT; i++) {
+    const mesh = thumbs[i]!
+    if (i >= COUNT) {
+      mesh.visible = false
+      continue
     }
-    dummy.updateMatrix()
-    dots.setMatrixAt(i, dummy.matrix)
+    const photo = photos[imageIds[i]]
+    if (!photo || !projectPoint(marker(i).position, pickWorld)) {
+      mesh.visible = false
+      continue
+    }
+    mesh.visible = true
+    mesh.position.copy(pickWorld)
+    const { w, h } = thumbSize(photo)
+    mesh.scale.set(w, h, 1)
+    mesh.renderOrder = slotK[i] === 0 ? 5 : 3
+    if (mesh.material.map !== photo.texture) {
+      mesh.material.map = photo.texture
+      mesh.material.needsUpdate = true
+    }
   }
-  dots.instanceMatrix.needsUpdate = true
 }
 
 const readPositions = () => {
@@ -354,13 +394,18 @@ const polePoint = () => {
   return best
 }
 
+const restockQueues = () => {
+  behind.length = 0
+  ahead.length = 0
+  const used = new Set<number>()
+  for (let i = 0; i < COUNT; i++) used.add(imageIds[i])
+  for (let i = photos.length - 1; i >= 0; i--) if (!used.has(i)) ahead.push(i)
+}
+
 const resetZoomWindow = () => {
   growth = 0
   zoomVel = 0
-  behind.length = 0
-  ahead.length = 0
-  nextId = 1
-  for (let i = 0; i < COUNT; i++) nextId = Math.max(nextId, numbers[i] + 1)
+  restockQueues()
 }
 
 const TAU = Math.PI * 2
@@ -444,6 +489,7 @@ const stepSpiralPose = (dt: number) => {
 }
 
 const setSeek = (index: number) => {
+  if (COUNT === 0) return
   const assignment = reassign(readPositions(), index)
   seek.set(assignment.targets)
   center = index
@@ -459,11 +505,11 @@ const setSeek = (index: number) => {
 const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
 const zooming = (now = performance.now()) => Math.abs(zoomVel) > sim.zoomHandoff || pinchLive(now)
 
-const setNumber = (index: number, n: number) => {
-  numbers[index] = n
+const takeId = (stack: number[], other: number[]) => {
+  if (stack.length) return stack.pop()!
+  if (other.length) return other.shift()!
+  return 0
 }
-
-const takeId = (stack: number[]) => stack.pop() ?? nextId++
 
 const captureLattice = () => {
   writeSlotTargets(slotK, growth, poleDir, twist, prevLattice)
@@ -508,11 +554,11 @@ const syncSlotsToGrowth = () => {
     if (enteringN === 0) continue
     const next = entering[--enteringN]
     if (slotK[i] > kMax) {
-      behind.push(numbers[i])
-      setNumber(i, takeId(ahead))
+      behind.push(imageIds[i])
+      imageIds[i] = takeId(ahead, behind)
     } else {
-      ahead.push(numbers[i])
-      setNumber(i, takeId(behind))
+      ahead.push(imageIds[i])
+      imageIds[i] = takeId(behind, ahead)
     }
     slotK[i] = next
     remapped[i] = 1
@@ -677,13 +723,19 @@ const stepPhysics = (dt: number) => {
   }
 }
 
-const pickIndexAt = (sx: number, sy: number, radiusPx: number) => {
+const pickIndexAt = (sx: number, sy: number, extraPx: number) => {
   let best = -1
-  let bestDist = radiusPx
+  let bestDist = Infinity
   screenToPlane(sx, sy, plane)
+  const extra = extraPx / diskPx
   for (let i = 0; i < COUNT; i++) {
-    if (!projectPoint(marker(i).position, pickWorld)) continue
-    const dist = Math.hypot(pickWorld.x - plane.x, pickWorld.y - plane.y) * diskPx
+    const photo = photos[imageIds[i]]
+    if (!photo || !projectPoint(marker(i).position, pickWorld)) continue
+    const { w, h } = thumbSize(photo)
+    const dx = Math.abs(pickWorld.x - plane.x)
+    const dy = Math.abs(pickWorld.y - plane.y)
+    if (dx > w * 0.5 + extra || dy > h * 0.5 + extra) continue
+    const dist = Math.hypot(dx / w, dy / h)
     if (dist < bestDist) {
       bestDist = dist
       best = i
@@ -702,7 +754,7 @@ const layout = () => {
   for (let i = 0; i < COUNT; i++) {
     const node = new THREE.Object3D()
     node.userData.index = i
-    numbers[i] = i + 1
+    imageIds[i] = i
     slotK[i] = i
     const point = slotPoint(i, 0)
     node.position.set(point[0], point[1], point[2])
@@ -710,10 +762,16 @@ const layout = () => {
   }
 }
 
+const updateImageUi = () => {
+  const n = photos.length
+  empty.hidden = n > 0
+  addBtn.hidden = n === 0
+  imageCount.textContent = n === 0 ? "No images" : n === 1 ? "1 image" : `${n} images`
+  clearImages.disabled = n === 0
+}
+
 const rebuildPoints = (n: number) => {
   setCount(n)
-  pointsValue.textContent = String(COUNT)
-  pointsInput.value = String(COUNT)
   clearMarkers()
   velocity.fill(0)
   seek.fill(0)
@@ -726,9 +784,15 @@ const rebuildPoints = (n: number) => {
   focusCandidate = -1
   seeking = true
   aimed = -1
-  nextId = COUNT + 1
   alignVel.set(0, 0, 0)
+  for (let i = 0; i < MAX_COUNT; i++) thumbs[i]!.visible = false
+  if (COUNT === 0) {
+    restockQueues()
+    updateImageUi()
+    return
+  }
   layout()
+  restockQueues()
   poleDir.copy(marker(0).position).normalize()
   writeLatticePose(poleDir, twist, poseNow)
   poseVel.set(0, 0, 0)
@@ -738,32 +802,140 @@ const rebuildPoints = (n: number) => {
   lastSpiralGrowth = Number.NaN
   lastSpiralLocalCount = 0
   setSpiral()
+  updateImageUi()
 }
 
-pointsInput.addEventListener("input", () => rebuildPoints(Number(pointsInput.value)))
+const updateSettingLabels = () => {
+  coarsenessVal.textContent = formatCoarseness(settings.coarseness)
+  areaVal.textContent = settings.imageArea.toFixed(2)
+  vigRadiusVal.textContent = settings.vignetteRadius.toFixed(2)
+  vigSoftVal.textContent = settings.vignetteSoftness.toFixed(2)
+  vigStrVal.textContent = settings.vignetteStrength.toFixed(2)
+}
+
+const syncDither = () => {
+  updateSettingLabels()
+  ditherPass.setSettings(settings)
+}
+
+const syncPalette = () => {
+  paletteEl.replaceChildren()
+  for (const [i, hex] of settings.colors.entries()) {
+    const label = document.createElement("label")
+    label.className = "swatch"
+    const input = document.createElement("input")
+    input.type = "color"
+    input.value = hex
+    input.addEventListener("input", () => {
+      settings.colors[i] = input.value
+      syncDither()
+    })
+    const remove = document.createElement("button")
+    remove.type = "button"
+    remove.textContent = "×"
+    remove.disabled = settings.colors.length <= 2
+    remove.addEventListener("click", (e) => {
+      e.preventDefault()
+      if (settings.colors.length <= 2) return
+      settings.colors.splice(i, 1)
+      syncPalette()
+      syncDither()
+    })
+    label.append(input, remove)
+    paletteEl.append(label)
+  }
+  addColor.disabled = settings.colors.length >= MAX_PALETTE
+  updateSettingLabels()
+}
+
+modeSelect.addEventListener("change", () => {
+  settings.mode = modeSelect.value as ModeId
+  syncDither()
+})
+coarsenessInput.addEventListener("input", () => {
+  settings.coarseness = 2 ** Number(coarsenessInput.value)
+  syncDither()
+})
+imageAreaInput.addEventListener("input", () => {
+  settings.imageArea = Number(imageAreaInput.value)
+  updateSettingLabels()
+})
+vignetteRadiusInput.addEventListener("input", () => {
+  settings.vignetteRadius = Number(vignetteRadiusInput.value)
+  syncDither()
+})
+vignetteSoftnessInput.addEventListener("input", () => {
+  settings.vignetteSoftness = Number(vignetteSoftnessInput.value)
+  syncDither()
+})
+vignetteStrengthInput.addEventListener("input", () => {
+  settings.vignetteStrength = Number(vignetteStrengthInput.value)
+  syncDither()
+})
+addColor.addEventListener("click", () => {
+  if (settings.colors.length >= MAX_PALETTE) return
+  settings.colors.push("#6b8f71")
+  syncPalette()
+  syncDither()
+})
+copySettings.addEventListener("click", async () => {
+  await navigator.clipboard.writeText(settingsJson(settings))
+  copySettings.textContent = "Copied"
+  window.setTimeout(() => {
+    copySettings.textContent = "Copy settings JSON"
+  }, 1200)
+})
+
+const addFiles = async (files: File[]) => {
+  const images = files.filter((file) => file.type.startsWith("image/"))
+  if (!images.length) return
+  for (const file of images) photos.push(await photoFromFile(file))
+  rebuildPoints(Math.min(photos.length, MAX_COUNT))
+}
+
+const clearAllImages = () => {
+  for (const photo of photos) disposePhoto(photo)
+  photos.length = 0
+  rebuildPoints(0)
+}
+
+fileInput.addEventListener("change", () => {
+  void addFiles([...(fileInput.files ?? [])])
+  fileInput.value = ""
+})
+addBtn.addEventListener("click", () => fileInput.click())
+addMore.addEventListener("click", () => fileInput.click())
+clearImages.addEventListener("click", clearAllImages)
+
+const prevent = (e: DragEvent) => {
+  e.preventDefault()
+  e.stopPropagation()
+}
+for (const ev of ["dragenter", "dragover", "dragleave", "drop"] as const) {
+  document.addEventListener(ev, prevent)
+}
+document.addEventListener("dragenter", () => document.body.classList.add("drag"))
+document.addEventListener("dragover", () => document.body.classList.add("drag"))
+document.addEventListener("dragleave", (e) => {
+  if (e.relatedTarget === null) document.body.classList.remove("drag")
+})
+document.addEventListener("drop", (e) => {
+  document.body.classList.remove("drag")
+  void addFiles([...(e.dataTransfer?.files ?? [])])
+})
+document.addEventListener("paste", (e) => {
+  void addFiles([...(e.clipboardData?.files ?? [])])
+})
 
 const resize = () => {
-  const w = innerWidth
-  const h = innerHeight
-  const aspect = w / Math.max(h, 1)
-  if (aspect >= 1) {
-    camera.left = -FRAME * aspect
-    camera.right = FRAME * aspect
-    camera.top = FRAME
-    camera.bottom = -FRAME
-  } else {
-    camera.left = -FRAME
-    camera.right = FRAME
-    camera.top = FRAME / aspect
-    camera.bottom = -FRAME / aspect
-  }
+  const css = Math.min(innerWidth, innerHeight)
+  camera.left = -FRAME
+  camera.right = FRAME
+  camera.top = FRAME
+  camera.bottom = -FRAME
   camera.updateProjectionMatrix()
-  renderer.setSize(w, h, false)
-  diskPx = Math.min(w, h) / (2 * FRAME)
-  dotRadius = DOT_RADIUS_PX / diskPx
-  const border = Math.max(BORDER_PX / diskPx, 0.0015)
-  rim.geometry.dispose()
-  rim.geometry = new THREE.RingGeometry(1 - border, 1, 256)
+  ditherPass.resize(css)
+  diskPx = css / (2 * FRAME)
 }
 
 const rotateByPointer = (event: PointerEvent) => {
@@ -797,7 +969,7 @@ canvas.addEventListener("pointerup", (event) => {
   const dragged = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5
   if (!dragged) {
     const rect = canvas.getBoundingClientRect()
-    const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, PICK_PX)
+    const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, PICK_PAD)
     if (index >= 0) setSeek(index)
     return
   }
@@ -837,6 +1009,7 @@ canvas.addEventListener(
   "wheel",
   (event) => {
     event.preventDefault()
+    if (COUNT === 0) return
     const now = performance.now()
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1
     let dx = event.deltaX * unit
@@ -913,20 +1086,21 @@ canvas.addEventListener("gestureend", ignoreGesture)
 
 addEventListener("resize", resize)
 
+syncPalette()
+syncDither()
+updateImageUi()
 resize()
-layout()
-poleDir.copy(marker(0).position).normalize()
-writeLatticePose(poleDir, twist, poseNow)
-poseVel.set(0, 0, 0)
-seek.set(readPositions())
-prevLattice.set(seek)
 lastContentQ.copy(content.quaternion)
-setSpiral()
 
 renderer.setAnimationLoop(() => {
   const now = performance.now()
   const dt = Math.min(0.05, (now - lastTime) / 1000)
   lastTime = now
+
+  if (COUNT === 0) {
+    ditherPass.render(scene, camera, settings)
+    return
+  }
 
   aimed = nearestToCenter()
 
@@ -956,6 +1130,6 @@ renderer.setAnimationLoop(() => {
 
   stepSpiralPose(dt)
   setSpiral()
-  projectDots()
-  renderer.render(scene, camera)
+  projectThumbs()
+  ditherPass.render(scene, camera, settings)
 })

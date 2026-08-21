@@ -122,6 +122,12 @@ const applyMap = (center: number, pointIds: number[], slotIds: number[]) => {
 /** Min-squared-travel recenter: LAPJV on θ², 14+8 twist search. */
 export const reassign = (positions: Float32Array, center: number): Assignment => {
   syncSlots()
+  if (COUNT <= 1) {
+    const targets = new Float32Array(COUNT * 3)
+    const ranks = new Int32Array(COUNT)
+    if (COUNT === 1) targets.set(positions.subarray(0, 3))
+    return { targets, ranks, twist: 0 }
+  }
   const n = COUNT - 1
   let k = 0
   for (let i = 0; i < COUNT; i++) if (i !== center) pointIds[k++] = i

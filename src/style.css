@@ -1,3 +1,19 @@
+:root {
+  color-scheme: dark;
+  --bg: #0e0d0b;
+  --panel: #161410;
+  --line: #2c2820;
+  --ink: #e8dfd0;
+  --muted: #8a8274;
+  --accent: #d4a24a;
+  --paper: #e6dcc8;
+  font-family: "IBM Plex Mono", "SFMono-Regular", ui-monospace, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.45;
+  background: #000;
+  color: var(--ink);
+}
+
 * {
   box-sizing: border-box;
 }
@@ -6,51 +22,216 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: #111;
-  color: #aaa;
-  font: 13px/1.4 system-ui, sans-serif;
+  background: #000;
+  color: var(--ink);
 }
 
 #canvas {
   display: block;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  translate: -50% -50%;
+  width: min(100vw, 100vh);
+  height: min(100vw, 100vh);
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
+
+.chrome {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  z-index: 4;
+  display: flex;
+  gap: 0.5rem;
+}
+
+.icon-btn,
+.add-btn,
+button,
+select {
+  font: inherit;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  padding: 0.4rem 0.65rem;
+  cursor: pointer;
+}
+
+.add-btn {
+  display: grid;
+  place-items: center;
+}
+
+.add-btn[hidden] {
+  display: none;
+}
+
+.icon-btn:hover,
+.add-btn:hover,
+button:hover,
+select:hover {
+  border-color: var(--accent);
+}
+
+button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.empty {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 0.75rem;
+  text-align: center;
+  padding: 2rem;
+  pointer-events: none;
+}
+
+.empty[hidden] {
+  display: none;
+}
+
+.empty h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+}
+
+.empty p {
+  margin: 0;
+  max-width: 28rem;
+  color: var(--muted);
+}
+
+.kicker {
+  margin: 0;
+  color: var(--accent);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+
+.file {
+  pointer-events: auto;
+  border: 1px dashed var(--line);
+  padding: 0.85rem 1.2rem;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.file:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.file input {
+  display: none;
 }
 
 .tweaks {
   position: absolute;
   top: 16px;
   right: 16px;
-  width: 240px;
-  padding: 12px 14px 10px;
-  border-radius: 10px;
-  background: rgba(18, 18, 18, 0.82);
-  border: 1px solid #2a2a2a;
-  color: #bbb;
-  z-index: 3;
-  backdrop-filter: blur(8px);
+  width: 260px;
+  max-height: calc(100% - 32px);
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  z-index: 5;
 }
 
-.tweaks h2 {
-  margin: 0 0 10px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
+.tweaks[hidden] {
+  display: none;
+}
+
+.tweaks-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem 0.55rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.tweaks-head h2 {
+  margin: 0;
+}
+
+.tweaks section {
+  padding: 0.85rem 1rem 1rem;
+  border-bottom: 1px solid var(--line);
+}
+
+h2 {
+  margin: 0 0 0.7rem;
+  font-size: 10px;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: #777;
+  color: var(--muted);
+  font-weight: 500;
 }
 
-.tweaks label {
+.hint {
+  margin: 0 0 0.7rem;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.field,
+.toggle {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin: 0 0 0.7rem;
+}
+
+.field span,
+.toggle span {
+  color: var(--muted);
+}
+
+.field em {
+  color: var(--ink);
+  font-style: normal;
+  float: right;
+}
+
+.toggle {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+input[type="range"],
+select {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+select {
+  padding: 0.4rem 0.5rem;
+  color-scheme: dark;
+}
+
+.tweaks label:not(.field):not(.toggle) {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 2px 10px;
   margin: 0 0 8px;
   font-size: 12px;
-  color: #9a9a9a;
+  color: var(--muted);
 }
 
 .tweaks label span:last-child {
-  color: #ddd;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 
@@ -58,32 +239,74 @@ body {
   grid-column: 1 / -1;
   width: 100%;
   margin: 0;
-  accent-color: #ffc14d;
 }
 
-.tweaks .toggle {
+.row {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 10px;
-  font-size: 12px;
-  color: #9a9a9a;
+  gap: 0.5rem;
 }
 
-.tweaks .toggle input {
-  accent-color: #ffc14d;
+.row button {
+  flex: 1;
 }
 
-.tweaks select {
-  grid-column: 1 / -1;
+.palette {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 0.7rem;
+}
+
+.swatch {
+  flex: 0 0 auto;
+  width: 3.2rem;
+  margin-bottom: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+}
+
+.swatch input {
   width: 100%;
-  margin: 2px 0 0;
-  padding: 5px 8px;
-  border-radius: 6px;
-  border: 1px solid #2a2a2a;
-  background: #1a1a1a;
-  color: #ddd;
-  font: inherit;
-  cursor: pointer;
-  color-scheme: dark;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line);
+  background: none;
+}
+
+.swatch button {
+  position: absolute;
+  top: -0.35rem;
+  right: -0.35rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  padding: 0;
+  line-height: 1;
+  font-size: 11px;
+  border-radius: 99px;
+}
+
+.swatch button:disabled {
+  display: none;
+}
+
+#addColor,
+#copySettings {
+  width: 100%;
+}
+
+body.drag::after {
+  content: "Drop images";
+  position: absolute;
+  inset: 0.75rem;
+  display: grid;
+  place-items: center;
+  border: 1px dashed var(--accent);
+  background: color-mix(in srgb, var(--bg) 70%, transparent);
+  color: var(--paper);
+  pointer-events: none;
+  z-index: 6;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 11px;
 }

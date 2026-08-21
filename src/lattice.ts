@@ -1,13 +1,13 @@
 import * as THREE from "three"
 
 /** Fixed window of Vogel slots. Zoom slides this window; it does not change the count. */
-export const MIN_COUNT = 5
+export const MIN_COUNT = 1
 export const MAX_COUNT = 70
-export let COUNT = 40
+export let COUNT = 0
 export const SPHERE_RADIUS = 1.03
 
 export const setCount = (n: number) => {
-  COUNT = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(n)))
+  COUNT = Math.min(MAX_COUNT, Math.max(0, Math.round(n)))
 }
 
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5))
