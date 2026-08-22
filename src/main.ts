@@ -294,10 +294,7 @@ const velVec = new THREE.Vector3()
 const omega = new THREE.Vector3()
 const viewDir = new THREE.Vector3(0, 0, 1)
 const worldPole = new THREE.Vector3()
-const ndc = new THREE.Vector2()
 const plane = new THREE.Vector2()
-const prevHit = new THREE.Vector3()
-const currHit = new THREE.Vector3()
 const rotQ = new THREE.Quaternion()
 const alignQ = new THREE.Quaternion()
 const lastContentQ = new THREE.Quaternion()
@@ -330,6 +327,7 @@ let twist = 0
 let aimed = -1
 let lastTime = performance.now()
 let pointerDown = { x: 0, y: 0 }
+let lastPan = { x: 0, y: 0 }
 let dragging = false
 let lastActiveWheel = 0
 let lastPinch = 0
@@ -379,30 +377,6 @@ const projectHemisphere = (x: number, y: number, z: number, out: THREE.Vector3) 
     }
     case "ortho":
       return out.set(x, y, 0)
-  }
-}
-
-/** Inverse of `projectHemisphere`. `(px, py)` is already clamped to the unit disk. */
-const unprojectDisk = (px: number, py: number, out: THREE.Vector3) => {
-  const rho2 = px * px + py * py
-  switch (projection) {
-    case "stereo": {
-      const d = 1 + rho2
-      return out.set((2 * px) / d, (2 * py) / d, (1 - rho2) / d)
-    }
-    case "area": {
-      const s = Math.sqrt(Math.max(0, 2 - rho2))
-      return out.set(px * s, py * s, 1 - rho2)
-    }
-    case "equidistant": {
-      const rho = Math.sqrt(rho2)
-      if (rho < 1e-12) return out.set(0, 0, 1)
-      const theta = rho * Math.PI * 0.5
-      const s = Math.sin(theta) / rho
-      return out.set(px * s, py * s, Math.cos(theta))
-    }
-    case "ortho":
-      return out.set(px, py, Math.sqrt(Math.max(0, 1 - rho2)))
   }
 }
 
@@ -899,22 +873,12 @@ const stepZoom = (dt: number) => {
   return true
 }
 
-const pointerNdc = (event: PointerEvent) => {
-  const rect = canvas.getBoundingClientRect()
-  ndc.set(((event.clientX - rect.left) / rect.width) * 2 - 1, -((event.clientY - rect.top) / rect.height) * 2 + 1)
-  return ndc
-}
-
-const ndcToHemisphere = (x: number, y: number, out: THREE.Vector3) => {
-  let px = camera.left + (x * 0.5 + 0.5) * (camera.right - camera.left)
-  let py = camera.bottom + (y * 0.5 + 0.5) * (camera.top - camera.bottom)
-  const r2 = px * px + py * py
-  if (r2 > 1) {
-    const inv = 1 / Math.sqrt(r2)
-    px *= inv
-    py *= inv
-  }
-  return unprojectDisk(px, py, out)
+const panByPixels = (dx: number, dy: number) => {
+  if (dx === 0 && dy === 0) return
+  rotQ.setFromAxisAngle(axisVec.set(0, 1, 0), -dx * PAN_ROTATE)
+  content.quaternion.premultiply(rotQ)
+  rotQ.setFromAxisAngle(axisVec.set(1, 0, 0), -dy * PAN_ROTATE)
+  content.quaternion.premultiply(rotQ)
 }
 
 const readContentDelta = () => {
@@ -1505,21 +1469,7 @@ const resize = () => {
   viewRect.h = view.height * worldPerPx
 }
 
-const rotateByPointer = (event: PointerEvent) => {
-  pointerNdc(event)
-  ndcToHemisphere(ndc.x, ndc.y, currHit)
-  if (prevHit.dot(currHit) < 0.999999) {
-    rotQ.setFromUnitVectors(prevHit, currHit)
-    content.quaternion.premultiply(rotQ)
-  }
-  prevHit.copy(currHit)
-}
-
-const ndcFromClient = (cx: number, cy: number) => {
-  const rect = canvas.getBoundingClientRect()
-  ndc.set(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1)
-  return ndc
-}
+const PINCH_ZOOM = 12
 
 const pointers = new Map<number, { x: number; y: number }>()
 let pinchDist = 0
@@ -1534,16 +1484,10 @@ const pinchGap = () => {
   return Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y)
 }
 
-const pinchMid = () => {
-  const pts = pinchPoints()
-  return { x: (pts[0]!.x + pts[1]!.x) * 0.5, y: (pts[0]!.y + pts[1]!.y) * 0.5 }
-}
-
 const beginPanFrom = (x: number, y: number) => {
   pointerDown = { x, y }
+  lastPan = { x, y }
   dragging = true
-  ndcFromClient(x, y)
-  ndcToHemisphere(ndc.x, ndc.y, prevHit)
   lastContentQ.copy(content.quaternion)
 }
 
@@ -1560,36 +1504,28 @@ canvas.addEventListener("pointerdown", (event) => {
   pinching = true
   didPinch = true
   seeking = false
+  alignVel.set(0, 0, 0)
   pinchDist = pinchGap()
   lastPinch = performance.now()
-  const mid = pinchMid()
-  ndcFromClient(mid.x, mid.y)
-  ndcToHemisphere(ndc.x, ndc.y, prevHit)
 })
 
 canvas.addEventListener("pointermove", (event) => {
   if (!pointers.has(event.pointerId)) return
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (pinching && pointers.size >= 2) {
-    const now = performance.now()
-    lastPinch = now
+    lastPinch = performance.now()
     const next = pinchGap()
-    if (pinchDist > 1) kickZoom((next - pinchDist) * sim.zoom * 4)
+    if (pinchDist > 1) kickZoom((next - pinchDist) * sim.zoom * PINCH_ZOOM)
     pinchDist = next
-    const mid = pinchMid()
-    ndcFromClient(mid.x, mid.y)
-    ndcToHemisphere(ndc.x, ndc.y, currHit)
-    if (prevHit.dot(currHit) < 0.999999) {
-      rotQ.setFromUnitVectors(prevHit, currHit)
-      content.quaternion.premultiply(rotQ)
-    }
-    prevHit.copy(currHit)
     seeking = false
     return
   }
-  if (!dragging) return
+  if (!dragging || pinching || pointers.size !== 1 || pinchLive()) return
+  const dx = event.clientX - lastPan.x
+  const dy = event.clientY - lastPan.y
+  lastPan = { x: event.clientX, y: event.clientY }
   if (seeking && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5) seeking = false
-  rotateByPointer(event)
+  panByPixels(dx, dy)
 })
 
 canvas.addEventListener("pointerup", (event) => {
@@ -1607,9 +1543,8 @@ canvas.addEventListener("pointerup", (event) => {
   }
   if (pointers.size === 1) {
     pinching = false
-    const rem = pinchPoints()[0]!
     pinchDist = 0
-    beginPanFrom(rem.x, rem.y)
+    dragging = false
     return
   }
   pinching = false
@@ -1735,10 +1670,7 @@ canvas.addEventListener(
     lastActiveWheel = now
     handedOff = false
     seeking = false
-    rotQ.setFromAxisAngle(axisVec.set(0, 1, 0), -dx * PAN_ROTATE)
-    content.quaternion.premultiply(rotQ)
-    rotQ.setFromAxisAngle(axisVec.set(1, 0, 0), -dy * PAN_ROTATE)
-    content.quaternion.premultiply(rotQ)
+    panByPixels(dx, dy)
   },
   { passive: false },
 )
