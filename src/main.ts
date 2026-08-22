@@ -315,6 +315,7 @@ const behind: number[] = []
 const ahead: number[] = []
 const occupied = new Uint8Array(MAX_COUNT + 2)
 const entering = new Int32Array(MAX_COUNT)
+const focusMul = new Float32Array(MAX_COUNT).fill(1)
 const poleDir = new THREE.Vector3(0, -1, 0)
 const centerDir = new THREE.Vector3(0, 0, 1)
 const spiralLocal = new Float32Array(SPIRAL_MAX_POINTS * 3)
@@ -397,7 +398,23 @@ const screenToPlane = (sx: number, sy: number, out: THREE.Vector2) => {
   return out
 }
 
-const thumbSize = (photo: Photo) => photoSize(photo.aspect, settings.imageArea)
+const FOCUS_SCALE = 2
+const FOCUS_POP = 26
+
+const thumbSize = (photo: Photo, focused = false) => {
+  const size = photoSize(photo.aspect, settings.imageArea)
+  if (!focused) return size
+  return { w: size.w * FOCUS_SCALE, h: size.h * FOCUS_SCALE }
+}
+
+const stepFocusScale = (dt: number) => {
+  const ease = 1 - Math.exp(-FOCUS_POP * dt)
+  const locked = seeking && handedOff
+  for (let i = 0; i < MAX_COUNT; i++) {
+    const target = i < COUNT && i === center && locked ? FOCUS_SCALE : 1
+    focusMul[i] += (target - focusMul[i]!) * ease
+  }
+}
 
 const fileMeta = (node: TreeNode): MetaSource | null => {
   if (node.kind !== "file" || !node.file) return null
@@ -532,7 +549,7 @@ const springInspect = (dt: number, tx: number, ty: number, tw: number, th: numbe
 }
 
 const inspectReveal = (photo: Photo) => {
-  const rest = thumbSize(photo)
+  const rest = thumbSize(photo, true)
   const fill = inspectFit(photo.aspect)
   const restLen = Math.hypot(rest.w, rest.h)
   const fillLen = Math.hypot(fill.w, fill.h)
@@ -574,6 +591,7 @@ const inspectSettled = () =>
   inspectScaleVel.lengthSq() < 1e-5
 
 const projectThumbs = (dt: number) => {
+  stepFocusScale(dt)
   let inspectShown = false
   for (let i = 0; i < MAX_COUNT; i++) {
     const mesh = thumbs[i]!
@@ -593,10 +611,11 @@ const projectThumbs = (dt: number) => {
       continue
     }
     const { w, h } = thumbSize(photo)
+    const mul = focusMul[i]!
     let x = front ? pickWorld.x : inspectPos.x
     let y = front ? pickWorld.y : inspectPos.y
-    let sx = w
-    let sy = h
+    let sx = w * mul
+    let sy = h * mul
     if (inspecting) {
       inspectShown = true
       if (!inspectSeeded) {
@@ -623,7 +642,7 @@ const projectThumbs = (dt: number) => {
       mesh.renderOrder = 10
       syncOverlay(photo, x, y, sx, sy)
     } else {
-      mesh.renderOrder = slotK[i] === 0 ? 5 : 3
+      mesh.renderOrder = i === center ? 6 : 3
     }
     mesh.visible = true
     mesh.position.set(x, y, 0)
@@ -989,10 +1008,13 @@ const pickIndexAt = (sx: number, sy: number, extraPx: number) => {
     const photo = photos[imageIds[i]]
     if (!photo || !projectPoint(marker(i).position, pickWorld)) continue
     const { w, h } = thumbSize(photo)
+    const mul = focusMul[i]!
+    const sw = w * mul
+    const sh = h * mul
     const dx = Math.abs(pickWorld.x - plane.x)
     const dy = Math.abs(pickWorld.y - plane.y)
-    if (dx > w * 0.5 + extra || dy > h * 0.5 + extra) continue
-    const dist = Math.hypot(dx / w, dy / h)
+    if (dx > sw * 0.5 + extra || dy > sh * 0.5 + extra) continue
+    const dist = Math.hypot(dx / sw, dy / sh)
     if (dist < bestDist) {
       bestDist = dist
       best = i
@@ -1046,6 +1068,7 @@ const rebuildPoints = (n: number) => {
   inspectPhoto = -1
   inspectSeeded = false
   hideOverlay()
+  focusMul.fill(1)
   for (let i = 0; i < MAX_COUNT; i++) thumbs[i]!.visible = false
   if (COUNT === 0) {
     restockQueues()
