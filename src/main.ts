@@ -75,7 +75,7 @@ const tweakFields: { key: keyof typeof sim; label: string; min: number; max: num
 ]
 
 const PICK_PAD = 4
-const PAN_ROTATE = 0.0024
+const PAN_ROTATE = 0.0048
 const PAN_HANDOFF_MS = 140
 const PAN_VEL_SMOOTH = 0.38
 const FOCUS_STABLE_MS = 160
@@ -1525,7 +1525,7 @@ canvas.addEventListener("pointermove", (event) => {
   const dy = event.clientY - lastPan.y
   lastPan = { x: event.clientX, y: event.clientY }
   if (seeking && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5) seeking = false
-  panByPixels(dx, dy)
+  panByPixels(-dx, -dy)
 })
 
 canvas.addEventListener("pointerup", (event) => {
