@@ -1,6 +1,6 @@
 import { clamp01, ColorImage, parseHexColor } from "./image.ts"
 import { blueNoiseMap, thresholdAt } from "./blueNoise.ts"
-import { MODES, bayerLevelFor, type ModeId, type Settings } from "./settings.ts"
+import { MODES, bayerLevelFor, paletteColors, type ModeId, type Settings } from "./settings.ts"
 
 type RGB = [number, number, number]
 type KernelTap = { x: number; y: number; w: number }
@@ -52,7 +52,7 @@ const nearest = (palette: RGB[], c: RGB): RGB => {
   return best
 }
 
-export const resolvePalette = (settings: Settings) => settings.colors.map((hex) => parseHexColor(hex))
+export const resolvePalette = (settings: Settings) => paletteColors(settings).map((hex) => parseHexColor(hex))
 
 const downsample = (src: ColorImage, coarse: number) => {
   if (coarse <= 1) return src
@@ -188,30 +188,31 @@ export const applyDither = (src: ColorImage, settings: Settings) => {
   return upsample(work, src.width, src.height, coarse)
 }
 
-/** Circular fade to black. Radius/softness are in NDC: 1 is the square's mid-edge. */
+/** Circular fade to the primary color. Radius/softness are in inscribed-square NDC: 1 is mid-edge. */
 export const applyCircularVignette = (
   img: ColorImage,
   radius: number,
   softness: number,
   strength: number,
+  background: RGB = [0, 0, 0],
 ) => {
   const w = img.width
   const h = img.height
+  const square = Math.min(w, h)
   const outer = radius + Math.max(1e-4, softness)
   const span = outer - radius
   for (let y = 0; y < h; y++) {
-    const py = ((y + 0.5) / h) * 2 - 1
+    const py = (((y + 0.5) / h) * 2 - 1) * (h / square)
     for (let x = 0; x < w; x++) {
-      const px = ((x + 0.5) / w) * 2 - 1
+      const px = (((x + 0.5) / w) * 2 - 1) * (w / square)
       const r = Math.hypot(px, py)
       let t = (r - radius) / span
       t = t < 0 ? 0 : t > 1 ? 1 : t
-      t = t * t * (3 - 2 * t)
-      const vig = 1 - t * strength
+      t = t * t * (3 - 2 * t) * strength
       const i = (y * w + x) * 3
-      img.data[i] *= vig
-      img.data[i + 1] *= vig
-      img.data[i + 2] *= vig
+      img.data[i] += (background[0] - img.data[i]!) * t
+      img.data[i + 1] += (background[1] - img.data[i + 1]!) * t
+      img.data[i + 2] += (background[2] - img.data[i + 2]!) * t
     }
   }
   return img

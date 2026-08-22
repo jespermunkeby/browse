@@ -3,6 +3,7 @@ import * as THREE from "three"
 import {
   COUNT,
   MAX_COUNT,
+  MIN_COUNT,
   SPHERE_RADIUS,
   SPIRAL_MAX_POINTS,
   setCount,
@@ -24,7 +25,18 @@ import {
   type Settings,
 } from "./dither/settings.ts"
 import { createDitherPass } from "./dither/pass.ts"
-import { disposePhoto, photoFromFile, photoSize, type Photo } from "./photos.ts"
+import { disposePhoto, isImageFile, isImagePath, photoFromFile, photoSize, type Photo } from "./photos.ts"
+import {
+  filesFromDataTransfer,
+  filesFromList,
+  findFile,
+  renderTree,
+  treeFromFiles,
+  type FolderFile,
+  type TreeNode,
+} from "./folder.ts"
+import { renderMeta, type MetaSource } from "./meta.ts"
+import { fetchDemoFile, loadDemoIndex } from "./defaultFolder.ts"
 
 const sim = {
   spring: 0.2,
@@ -36,6 +48,9 @@ const sim = {
   spiralSpring: 0.55,
   spiralDamping: 0.45,
   spiralMass: 1,
+  inspectSpring: 0.45,
+  inspectDamping: 0.6,
+  inspectMass: 1,
   zoom: 0.028,
   zoomDamp: 2.8,
   zoomHandoff: 4.6,
@@ -51,6 +66,9 @@ const tweakFields: { key: keyof typeof sim; label: string; min: number; max: num
   { key: "spiralSpring", label: "Spiral spring", min: 0, max: 1.5, step: 0.05 },
   { key: "spiralDamping", label: "Spiral damping", min: 0.05, max: 1.4, step: 0.05 },
   { key: "spiralMass", label: "Spiral mass", min: 0.2, max: 4, step: 0.1 },
+  { key: "inspectSpring", label: "Inspect spring", min: 0, max: 1.5, step: 0.05 },
+  { key: "inspectDamping", label: "Inspect damping", min: 0.05, max: 1.4, step: 0.05 },
+  { key: "inspectMass", label: "Inspect mass", min: 0.2, max: 4, step: 0.1 },
   { key: "zoom", label: "Zoom speed", min: 0.002, max: 0.05, step: 0.002 },
   { key: "zoomDamp", label: "Zoom damp", min: 0.4, max: 10, step: 0.2 },
   { key: "zoomHandoff", label: "Zoom handoff", min: 0, max: 10, step: 0.1 },
@@ -68,24 +86,32 @@ const FRAME = 1.12
 const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!
 const tweaks = document.querySelector<HTMLElement>("#tweaks")!
 const motion = document.querySelector<HTMLElement>("#motion")!
-const empty = document.querySelector<HTMLElement>("#empty")!
-const addBtn = document.querySelector<HTMLElement>("#addBtn")!
-const settingsBtn = document.querySelector<HTMLButtonElement>("#settingsBtn")!
-const settingsClose = document.querySelector<HTMLButtonElement>("#settingsClose")!
+const viewPanel = document.querySelector<HTMLElement>("#viewPanel")!
+const treeEl = document.querySelector<HTMLElement>("#tree")!
+const metaEl = document.querySelector<HTMLElement>("#meta")!
+const dataTab = document.querySelector<HTMLButtonElement>("#dataTab")!
+const settingsTab = document.querySelector<HTMLButtonElement>("#settingsTab")!
 const fileInput = document.querySelector<HTMLInputElement>("#file")!
 const addMore = document.querySelector<HTMLButtonElement>("#addMore")!
 const clearImages = document.querySelector<HTMLButtonElement>("#clearImages")!
 const imageCount = document.querySelector<HTMLElement>("#imageCount")!
 const paletteEl = document.querySelector<HTMLElement>("#palette")!
+const primaryColor = document.querySelector<HTMLInputElement>("#primaryColor")!
+const secondaryColor = document.querySelector<HTMLInputElement>("#secondaryColor")!
 const addColor = document.querySelector<HTMLButtonElement>("#addColor")!
 const modeSelect = document.querySelector<HTMLSelectElement>("#mode")!
 const coarsenessInput = document.querySelector<HTMLInputElement>("#coarseness")!
 const coarsenessVal = document.querySelector<HTMLElement>("#coarsenessVal")!
 const copySettings = document.querySelector<HTMLButtonElement>("#copySettings")!
+const pasteSettings = document.querySelector<HTMLButtonElement>("#pasteSettings")!
 const projectionSelect = document.querySelector<HTMLSelectElement>("#projection")!
 const spiralCheck = document.querySelector<HTMLInputElement>("#spiral")!
 const imageAreaInput = document.querySelector<HTMLInputElement>("#imageArea")!
 const areaVal = document.querySelector<HTMLElement>("#areaVal")!
+const sphereCountInput = document.querySelector<HTMLInputElement>("#sphereCount")!
+const sphereCountVal = document.querySelector<HTMLElement>("#sphereCountVal")!
+const loadingEl = document.querySelector<HTMLElement>("#loading")!
+const loadingText = document.querySelector<HTMLElement>("#loadingText")!
 const vignetteRadiusInput = document.querySelector<HTMLInputElement>("#vignetteRadius")!
 const vigRadiusVal = document.querySelector<HTMLElement>("#vigRadiusVal")!
 const vignetteSoftnessInput = document.querySelector<HTMLInputElement>("#vignetteSoftness")!
@@ -107,20 +133,32 @@ const settings: Settings = {
   colors: [...DEFAULT_SETTINGS.colors],
 }
 const photos: Photo[] = []
+const photoByPath = new Map<string, number>()
+let folderTree: TreeNode | null = null
+let focusedPath: string | null = null
+let focusedNode: TreeNode | null = null
 
 let showSpiral = false
 let projection: ProjectionId = "stereo"
 
 const formatTweak = (value: number, step: number) => value.toFixed(step < 0.01 ? 3 : step < 0.1 ? 2 : 1)
 
-const setSettingsOpen = (open: boolean) => {
-  tweaks.hidden = !open
-  settingsBtn.hidden = open
-  settingsBtn.setAttribute("aria-expanded", String(open))
+const extraJson = () => ({ projection, spiral: showSpiral, motion: { ...sim } })
+
+const motionControls = new Map<keyof typeof sim, { input: HTMLInputElement; value: HTMLElement }>()
+
+const setPane = (pane: "data" | "settings") => {
+  const settingsOpen = pane === "settings"
+  tweaks.hidden = !settingsOpen
+  metaEl.hidden = settingsOpen
+  dataTab.classList.toggle("is-active", !settingsOpen)
+  settingsTab.classList.toggle("is-active", settingsOpen)
+  dataTab.setAttribute("aria-selected", String(!settingsOpen))
+  settingsTab.setAttribute("aria-selected", String(settingsOpen))
 }
 
-settingsBtn.addEventListener("click", () => setSettingsOpen(true))
-settingsClose.addEventListener("click", () => setSettingsOpen(false))
+dataTab.addEventListener("click", () => setPane("data"))
+settingsTab.addEventListener("click", () => setPane("settings"))
 
 for (const option of projections) {
   const el = document.createElement("option")
@@ -139,6 +177,9 @@ for (const item of MODES) {
 modeSelect.value = settings.mode
 coarsenessInput.value = String(Math.round(Math.log2(settings.coarseness)))
 imageAreaInput.value = String(settings.imageArea)
+sphereCountInput.min = String(MIN_COUNT)
+sphereCountInput.max = String(MAX_COUNT)
+sphereCountInput.value = String(settings.sphereCount)
 vignetteRadiusInput.value = String(settings.vignetteRadius)
 vignetteSoftnessInput.value = String(settings.vignetteSoftness)
 vignetteStrengthInput.value = String(settings.vignetteStrength)
@@ -159,6 +200,7 @@ for (const field of tweakFields) {
     sim[field.key] = Number(input.value)
     value.textContent = formatTweak(sim[field.key], field.step)
   })
+  motionControls.set(field.key, { input, value })
   label.append(Object.assign(document.createElement("span"), { textContent: field.label }), value, input)
   motion.append(label)
 }
@@ -166,10 +208,10 @@ for (const field of tweakFields) {
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: false })
 renderer.setPixelRatio(1)
 renderer.outputColorSpace = THREE.SRGBColorSpace
-renderer.setClearColor(0x000000, 1)
+renderer.setClearColor(settings.primary, 1)
 
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(0x000000)
+scene.background = new THREE.Color(settings.primary)
 
 const camera = new THREE.OrthographicCamera(-FRAME, FRAME, FRAME, -FRAME, -10, 10)
 camera.position.set(0, 0, 5)
@@ -183,6 +225,10 @@ const markers = new THREE.Group()
 content.add(markers)
 
 const thumbGeo = new THREE.PlaneGeometry(1, 1)
+{
+  const uv = thumbGeo.attributes.uv!
+  for (let i = 0; i < uv.count; i++) uv.setY(i, 1 - uv.getY(i)!)
+}
 const thumbs: THREE.Mesh<THREE.PlaneGeometry, THREE.MeshBasicMaterial>[] = []
 for (let i = 0; i < MAX_COUNT; i++) {
   const mesh = new THREE.Mesh(
@@ -195,6 +241,21 @@ for (let i = 0; i < MAX_COUNT; i++) {
   scene.add(mesh)
   thumbs.push(mesh)
 }
+
+const overlayScene = new THREE.Scene()
+const overlay = new THREE.Mesh(
+  thumbGeo,
+  new THREE.MeshBasicMaterial({
+    transparent: true,
+    opacity: 0,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  }),
+)
+overlay.frustumCulled = false
+overlay.visible = false
+overlayScene.add(overlay)
 
 const spiralGeometry = new THREE.BufferGeometry()
 const spiral = new THREE.Line(
@@ -286,6 +347,16 @@ let focusCandidateSince = 0
 let spiralReady = false
 let lastSpiralGrowth = Number.NaN
 let lastSpiralLocalCount = 0
+let inspectOpen = false
+let inspectPhoto = -1
+let inspectSeeded = false
+const inspectPos = new THREE.Vector2()
+const inspectScale = new THREE.Vector2()
+const inspectPosVel = new THREE.Vector2()
+const inspectScaleVel = new THREE.Vector2()
+const inspectTargetPos = new THREE.Vector2()
+const inspectTargetScale = new THREE.Vector2()
+const viewRect = { x: 0, y: 0, w: 2, h: 2 }
 
 const marker = (i: number) => markers.children[i]
 
@@ -354,7 +425,182 @@ const screenToPlane = (sx: number, sy: number, out: THREE.Vector2) => {
 
 const thumbSize = (photo: Photo) => photoSize(photo.aspect, settings.imageArea)
 
-const projectThumbs = () => {
+const fileMeta = (node: TreeNode): MetaSource | null => {
+  if (node.kind !== "file" || !node.file) return null
+  const photoIndex = photoByPath.get(node.path)
+  const photo = photoIndex === undefined ? undefined : photos[photoIndex]
+  return {
+    name: node.name,
+    path: node.path,
+    kind: photo ? "image" : "file",
+    type: node.file.type,
+    bytes: node.file.size,
+    modified: node.file.lastModified,
+    width: photo?.width,
+    height: photo?.height,
+  }
+}
+
+const photoMeta = (photo: Photo): MetaSource => ({
+  name: photo.name,
+  path: photo.path,
+  kind: "image",
+  type: photo.type,
+  bytes: photo.bytes,
+  modified: photo.modified,
+  width: photo.width,
+  height: photo.height,
+})
+
+const syncTree = () => renderTree(folderTree, treeEl, focusedPath, (node) => setFocusFromTree(node))
+
+const syncMeta = () => {
+  if (focusedNode) {
+    renderMeta(metaEl, fileMeta(focusedNode))
+    return
+  }
+  if (focusedPath) {
+    const photoIndex = photoByPath.get(focusedPath)
+    const photo = photoIndex === undefined ? undefined : photos[photoIndex]
+    renderMeta(metaEl, photo ? photoMeta(photo) : null)
+    return
+  }
+  renderMeta(metaEl, null)
+}
+
+const setFocusedPath = (path: string | null) => {
+  const nextNode = path ? findFile(folderTree, path) : null
+  if (path === focusedPath && nextNode === focusedNode) return
+  focusedPath = path
+  focusedNode = nextNode
+  syncTree()
+  syncMeta()
+}
+
+const markerForPhoto = (photoIndex: number) => {
+  for (let i = 0; i < COUNT; i++) if (imageIds[i] === photoIndex) return i
+  return -1
+}
+
+const focusPhoto = (photoIndex: number) => {
+  let index = markerForPhoto(photoIndex)
+  if (index < 0 && COUNT > 0) {
+    imageIds[center] = photoIndex
+    restockQueues()
+    index = center
+  }
+  if (index >= 0) setSeek(index)
+  setFocusedPath(photos[photoIndex]?.path ?? null)
+}
+
+const setFocusFromTree = (node: TreeNode) => {
+  if (node.kind !== "file") return
+  const photoIndex = photoByPath.get(node.path)
+  if (photoIndex !== undefined) {
+    if (inspectOpen) closeInspect()
+    focusPhoto(photoIndex)
+    return
+  }
+  setFocusedPath(node.path)
+}
+
+const closeInspect = () => {
+  inspectOpen = false
+}
+
+const openInspect = (index: number) => {
+  const photoIndex = imageIds[index]
+  const mesh = thumbs[index]!
+  inspectPhoto = photoIndex
+  inspectOpen = true
+  inspectSeeded = true
+  inspectPos.set(mesh.position.x, mesh.position.y)
+  inspectScale.set(mesh.scale.x, mesh.scale.y)
+  inspectPosVel.set(0, 0)
+  inspectScaleVel.set(0, 0)
+  setFocusedPath(photos[photoIndex]?.path ?? null)
+}
+
+const inspectFit = (aspect: number) => {
+  const pad = 0.04 * Math.min(viewRect.w, viewRect.h)
+  const availW = Math.max(1e-4, viewRect.w - 2 * pad)
+  const availH = Math.max(1e-4, viewRect.h - 2 * pad)
+  const r = Math.max(1e-6, aspect)
+  if (r > availW / availH) return { w: availW, h: availW / r }
+  return { w: availH * r, h: availH }
+}
+
+const springInspect = (dt: number, tx: number, ty: number, tw: number, th: number) => {
+  inspectTargetPos.set(tx, ty)
+  inspectTargetScale.set(tw, th)
+  const k = sim.inspectSpring * 36
+  if (k <= 0) {
+    inspectPos.copy(inspectTargetPos)
+    inspectScale.copy(inspectTargetScale)
+    inspectPosVel.set(0, 0)
+    inspectScaleVel.set(0, 0)
+    return
+  }
+  const mass = Math.max(0.05, sim.inspectMass)
+  const c = 2 * sim.inspectDamping * Math.sqrt(k * mass)
+  const step = (pos: THREE.Vector2, vel: THREE.Vector2, target: THREE.Vector2) => {
+    forceVec.set(target.x - pos.x, target.y - pos.y, 0)
+    forceVec.multiplyScalar(k)
+    forceVec.x -= vel.x * c
+    forceVec.y -= vel.y * c
+    vel.x += (forceVec.x * dt) / mass
+    vel.y += (forceVec.y * dt) / mass
+    pos.x += vel.x * dt
+    pos.y += vel.y * dt
+  }
+  step(inspectPos, inspectPosVel, inspectTargetPos)
+  step(inspectScale, inspectScaleVel, inspectTargetScale)
+}
+
+const inspectReveal = (photo: Photo) => {
+  const rest = thumbSize(photo)
+  const fill = inspectFit(photo.aspect)
+  const restLen = Math.hypot(rest.w, rest.h)
+  const fillLen = Math.hypot(fill.w, fill.h)
+  const curLen = Math.hypot(inspectScale.x, inspectScale.y)
+  const span = fillLen - restLen
+  if (span <= 1e-8) return inspectOpen ? 1 : 0
+  return Math.min(1, Math.max(0, (curLen - restLen) / span))
+}
+
+const hideOverlay = () => {
+  overlay.visible = false
+  overlay.material.opacity = 0
+}
+
+const syncOverlay = (photo: Photo, x: number, y: number, sx: number, sy: number) => {
+  overlay.visible = true
+  overlay.position.set(x, y, 0)
+  overlay.scale.set(sx, sy, 1)
+  overlay.material.opacity = inspectReveal(photo)
+  if (overlay.material.map !== photo.texture) {
+    overlay.material.map = photo.texture
+    overlay.material.needsUpdate = true
+  }
+}
+
+const present = () => {
+  ditherPass.render(scene, camera, settings)
+  if (!overlay.visible || overlay.material.opacity <= 0) return
+  const prev = renderer.autoClear
+  renderer.autoClear = false
+  renderer.render(overlayScene, camera)
+  renderer.autoClear = prev
+}
+
+const inspectSettled = () =>
+  inspectPos.distanceToSquared(inspectTargetPos) < 1e-6 &&
+  inspectScale.distanceToSquared(inspectTargetScale) < 1e-6 &&
+  inspectPosVel.lengthSq() < 1e-5 &&
+  inspectScaleVel.lengthSq() < 1e-5
+
+const projectThumbs = (dt: number) => {
+  let inspectShown = false
   for (let i = 0; i < MAX_COUNT; i++) {
     const mesh = thumbs[i]!
     if (i >= COUNT) {
@@ -362,19 +608,64 @@ const projectThumbs = () => {
       continue
     }
     const photo = photos[imageIds[i]]
-    if (!photo || !projectPoint(marker(i).position, pickWorld)) {
+    const inspecting = inspectPhoto >= 0 && imageIds[i] === inspectPhoto
+    const front = !!photo && projectPoint(marker(i).position, pickWorld)
+    if (!photo || (!front && !(inspecting && inspectOpen))) {
+      if (inspecting && !inspectOpen) {
+        inspectPhoto = -1
+        inspectSeeded = false
+      }
       mesh.visible = false
       continue
     }
-    mesh.visible = true
-    mesh.position.copy(pickWorld)
     const { w, h } = thumbSize(photo)
-    mesh.scale.set(w, h, 1)
-    mesh.renderOrder = slotK[i] === 0 ? 5 : 3
+    let x = front ? pickWorld.x : inspectPos.x
+    let y = front ? pickWorld.y : inspectPos.y
+    let sx = w
+    let sy = h
+    if (inspecting) {
+      inspectShown = true
+      if (!inspectSeeded) {
+        inspectPos.set(x, y)
+        inspectScale.set(sx, sy)
+        inspectPosVel.set(0, 0)
+        inspectScaleVel.set(0, 0)
+        inspectSeeded = true
+      }
+      if (inspectOpen) {
+        const fit = inspectFit(photo.aspect)
+        springInspect(dt, viewRect.x, viewRect.y, fit.w, fit.h)
+      } else {
+        springInspect(dt, x, y, sx, sy)
+        if (inspectSettled()) {
+          inspectPhoto = -1
+          inspectSeeded = false
+        }
+      }
+      x = inspectPos.x
+      y = inspectPos.y
+      sx = inspectScale.x
+      sy = inspectScale.y
+      mesh.renderOrder = 10
+      syncOverlay(photo, x, y, sx, sy)
+    } else {
+      mesh.renderOrder = slotK[i] === 0 ? 5 : 3
+    }
+    mesh.visible = true
+    mesh.position.set(x, y, 0)
+    mesh.scale.set(sx, sy, 1)
     if (mesh.material.map !== photo.texture) {
       mesh.material.map = photo.texture
       mesh.material.needsUpdate = true
     }
+  }
+  if (inspectPhoto >= 0 && !inspectShown) {
+    inspectOpen = false
+    inspectPhoto = -1
+    inspectSeeded = false
+    hideOverlay()
+  } else if (inspectPhoto < 0) {
+    hideOverlay()
   }
 }
 
@@ -490,6 +781,7 @@ const stepSpiralPose = (dt: number) => {
 
 const setSeek = (index: number) => {
   if (COUNT === 0) return
+  if (inspectOpen && inspectPhoto !== imageIds[index]) closeInspect()
   const assignment = reassign(readPositions(), index)
   seek.set(assignment.targets)
   center = index
@@ -500,6 +792,7 @@ const setSeek = (index: number) => {
   prevLattice.set(assignment.targets)
   seeking = true
   twist = ((assignment.twist % TAU) + TAU) % TAU
+  setFocusedPath(photos[imageIds[index]]?.path ?? null)
 }
 
 const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
@@ -566,7 +859,7 @@ const syncSlotsToGrowth = () => {
 }
 
 const kickZoom = (impulse: number) => {
-  if (impulse === 0) return
+  if (impulse === 0 || inspectOpen || COUNT === 0) return
   if (!zooming()) {
     captureLattice()
     focusCandidate = center
@@ -677,7 +970,7 @@ const autoAlign = (dt: number) => {
 }
 
 const stepFocus = (now: number) => {
-  if (zooming() || dragging || !handedOff) {
+  if (inspectOpen || inspectPhoto >= 0 || zooming() || dragging || !handedOff) {
     focusCandidate = -1
     return
   }
@@ -764,10 +1057,10 @@ const layout = () => {
 
 const updateImageUi = () => {
   const n = photos.length
-  empty.hidden = n > 0
-  addBtn.hidden = n === 0
   imageCount.textContent = n === 0 ? "No images" : n === 1 ? "1 image" : `${n} images`
-  clearImages.disabled = n === 0
+  clearImages.disabled = n === 0 && !folderTree
+  syncTree()
+  syncMeta()
 }
 
 const rebuildPoints = (n: number) => {
@@ -785,6 +1078,10 @@ const rebuildPoints = (n: number) => {
   seeking = true
   aimed = -1
   alignVel.set(0, 0, 0)
+  inspectOpen = false
+  inspectPhoto = -1
+  inspectSeeded = false
+  hideOverlay()
   for (let i = 0; i < MAX_COUNT; i++) thumbs[i]!.visible = false
   if (COUNT === 0) {
     restockQueues()
@@ -808,17 +1105,30 @@ const rebuildPoints = (n: number) => {
 const updateSettingLabels = () => {
   coarsenessVal.textContent = formatCoarseness(settings.coarseness)
   areaVal.textContent = settings.imageArea.toFixed(2)
+  sphereCountVal.textContent = String(settings.sphereCount)
   vigRadiusVal.textContent = settings.vignetteRadius.toFixed(2)
   vigSoftVal.textContent = settings.vignetteSoftness.toFixed(2)
   vigStrVal.textContent = settings.vignetteStrength.toFixed(2)
 }
 
+const applyTheme = () => {
+  document.documentElement.style.setProperty("--primary", settings.primary)
+  document.documentElement.style.setProperty("--secondary", settings.secondary)
+  renderer.setClearColor(settings.primary, 1)
+  scene.background = new THREE.Color(settings.primary)
+}
+
 const syncDither = () => {
   updateSettingLabels()
+  applyTheme()
   ditherPass.setSettings(settings)
 }
 
+const extraColorCap = Math.max(0, MAX_PALETTE - 2)
+
 const syncPalette = () => {
+  primaryColor.value = settings.primary
+  secondaryColor.value = settings.secondary
   paletteEl.replaceChildren()
   for (const [i, hex] of settings.colors.entries()) {
     const label = document.createElement("label")
@@ -833,10 +1143,10 @@ const syncPalette = () => {
     const remove = document.createElement("button")
     remove.type = "button"
     remove.textContent = "×"
-    remove.disabled = settings.colors.length <= 2
+    remove.disabled = settings.colors.length <= 0
     remove.addEventListener("click", (e) => {
       e.preventDefault()
-      if (settings.colors.length <= 2) return
+      if (settings.colors.length <= 0) return
       settings.colors.splice(i, 1)
       syncPalette()
       syncDither()
@@ -844,7 +1154,7 @@ const syncPalette = () => {
     label.append(input, remove)
     paletteEl.append(label)
   }
-  addColor.disabled = settings.colors.length >= MAX_PALETTE
+  addColor.disabled = settings.colors.length >= extraColorCap
   updateSettingLabels()
 }
 
@@ -860,6 +1170,11 @@ imageAreaInput.addEventListener("input", () => {
   settings.imageArea = Number(imageAreaInput.value)
   updateSettingLabels()
 })
+sphereCountInput.addEventListener("input", () => {
+  settings.sphereCount = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(Number(sphereCountInput.value))))
+  updateSettingLabels()
+  if (photos.length) rebuildPoints(Math.min(photos.length, settings.sphereCount))
+})
 vignetteRadiusInput.addEventListener("input", () => {
   settings.vignetteRadius = Number(vignetteRadiusInput.value)
   syncDither()
@@ -873,37 +1188,278 @@ vignetteStrengthInput.addEventListener("input", () => {
   syncDither()
 })
 addColor.addEventListener("click", () => {
-  if (settings.colors.length >= MAX_PALETTE) return
+  if (settings.colors.length >= extraColorCap) return
   settings.colors.push("#6b8f71")
   syncPalette()
   syncDither()
 })
+primaryColor.addEventListener("input", () => {
+  settings.primary = primaryColor.value
+  syncDither()
+})
+secondaryColor.addEventListener("input", () => {
+  settings.secondary = secondaryColor.value
+  applyTheme()
+  ditherPass.setSettings(settings)
+})
+
+const asHex = (value: unknown) => (typeof value === "string" && /^#[0-9a-fA-F]{6}$/.test(value) ? value : null)
+
+const applySnapshot = (raw: unknown) => {
+  if (!raw || typeof raw !== "object") return false
+  const o = raw as Record<string, unknown>
+  if (typeof o.mode === "string" && MODES.some((item) => item.id === o.mode)) {
+    settings.mode = o.mode as ModeId
+    modeSelect.value = settings.mode
+  }
+  const primary = asHex(o.primary)
+  if (primary) settings.primary = primary
+  const secondary = asHex(o.secondary)
+  if (secondary) settings.secondary = secondary
+  if (Array.isArray(o.colors)) {
+    const next = o.colors.map(asHex).filter((hex): hex is string => hex !== null)
+    if (next.length) settings.colors = next.slice(0, extraColorCap)
+  }
+  if (typeof o.coarseness === "number" && o.coarseness > 0) {
+    settings.coarseness = 2 ** Math.round(Math.log2(o.coarseness))
+    coarsenessInput.value = String(Math.round(Math.log2(settings.coarseness)))
+  }
+  if (typeof o.imageArea === "number") {
+    settings.imageArea = o.imageArea
+    imageAreaInput.value = String(settings.imageArea)
+  }
+  if (typeof o.sphereCount === "number") {
+    settings.sphereCount = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(o.sphereCount)))
+    sphereCountInput.value = String(settings.sphereCount)
+  }
+  if (typeof o.vignetteRadius === "number") {
+    settings.vignetteRadius = o.vignetteRadius
+    vignetteRadiusInput.value = String(settings.vignetteRadius)
+  }
+  if (typeof o.vignetteSoftness === "number") {
+    settings.vignetteSoftness = o.vignetteSoftness
+    vignetteSoftnessInput.value = String(settings.vignetteSoftness)
+  }
+  if (typeof o.vignetteStrength === "number") {
+    settings.vignetteStrength = o.vignetteStrength
+    vignetteStrengthInput.value = String(settings.vignetteStrength)
+  }
+  if (typeof o.projection === "string" && projections.some((item) => item.id === o.projection)) {
+    projection = o.projection as ProjectionId
+    projectionSelect.value = projection
+  }
+  if (typeof o.spiral === "boolean") {
+    showSpiral = o.spiral
+    spiralCheck.checked = showSpiral
+    spiral.visible = showSpiral
+    if (showSpiral) setSpiral()
+  }
+  if (o.motion && typeof o.motion === "object") {
+    const incoming = o.motion as Record<string, unknown>
+    for (const field of tweakFields) {
+      const n = Number(incoming[field.key])
+      if (!Number.isFinite(n)) continue
+      sim[field.key] = n
+      const ctrl = motionControls.get(field.key)
+      if (!ctrl) continue
+      ctrl.input.value = String(sim[field.key])
+      ctrl.value.textContent = formatTweak(sim[field.key], field.step)
+    }
+  }
+  syncPalette()
+  syncDither()
+  if (photos.length && typeof o.sphereCount === "number") {
+    rebuildPoints(Math.min(photos.length, settings.sphereCount))
+  }
+  return true
+}
+
 copySettings.addEventListener("click", async () => {
-  await navigator.clipboard.writeText(settingsJson(settings))
+  await navigator.clipboard.writeText(settingsJson(settings, extraJson()))
   copySettings.textContent = "Copied"
   window.setTimeout(() => {
-    copySettings.textContent = "Copy settings JSON"
+    copySettings.textContent = "Copy JSON"
   }, 1200)
 })
 
-const addFiles = async (files: File[]) => {
-  const images = files.filter((file) => file.type.startsWith("image/"))
-  if (!images.length) return
-  for (const file of images) photos.push(await photoFromFile(file))
-  rebuildPoints(Math.min(photos.length, MAX_COUNT))
+pasteSettings.addEventListener("click", async () => {
+  try {
+    const text = await navigator.clipboard.readText()
+    const ok = applySnapshot(JSON.parse(text))
+    pasteSettings.textContent = ok ? "Pasted" : "Invalid"
+  } catch {
+    pasteSettings.textContent = "Invalid"
+  }
+  window.setTimeout(() => {
+    pasteSettings.textContent = "Paste JSON"
+  }, 1200)
+})
+
+const resetLibrary = () => {
+  for (const photo of photos) disposePhoto(photo)
+  photos.length = 0
+  photoByPath.clear()
+  focusedPath = null
+  focusedNode = null
+  inspectOpen = false
+  inspectPhoto = -1
+  inspectSeeded = false
+  hideOverlay()
+}
+
+const shuffle = <T>(items: T[]) => {
+  for (let i = items.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const a = items[i]!
+    items[i] = items[j]!
+    items[j] = a
+  }
+  return items
+}
+
+const retargetSlots = () => {
+  for (let i = 0; i < COUNT; i++) {
+    slotK[i] = i
+    const point = slotPoint(i, growth)
+    seek[i * 3] = point[0]
+    seek[i * 3 + 1] = point[1]
+    seek[i * 3 + 2] = point[2]
+  }
+}
+
+const spawnPoint = (photoIndex: number) => {
+  const i = COUNT
+  setCount(COUNT + 1)
+  const node = new THREE.Object3D()
+  node.userData.index = i
+  imageIds[i] = photoIndex
+  slotK[i] = i
+  if (i === 0) {
+    const point = slotPoint(0, 0)
+    node.position.set(point[0], point[1], point[2])
+    poleDir.copy(node.position).normalize()
+    writeLatticePose(poleDir, twist, poseNow)
+    poseVel.set(0, 0, 0)
+    lastContentQ.copy(content.quaternion)
+    center = 0
+    focusCandidate = 0
+    seeking = true
+  } else {
+    node.position.copy(marker(0).position)
+  }
+  markers.add(node)
+  velocity[i * 3] = 0
+  velocity[i * 3 + 1] = 0
+  velocity[i * 3 + 2] = 0
+  retargetSlots()
+  prevLattice.set(seek)
+  restockQueues()
+}
+
+const LOAD_BAR = 14
+const LOAD_SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+let loadDone = 0
+let loadTotal = 0
+let loadSpin = 0
+let lastLoadSpin = 0
+
+const paintLoading = () => {
+  const active = loadTotal < 0 || (loadTotal > 0 && loadDone < loadTotal)
+  loadingEl.hidden = !active
+  if (!active) return
+  if (loadTotal < 0) {
+    loadingText.textContent = `  ${LOAD_SPIN[loadSpin]}\n  loading`
+    return
+  }
+  const filled = Math.round((loadDone / loadTotal) * LOAD_BAR)
+  loadingText.textContent = `  ${LOAD_SPIN[loadSpin]} ${"█".repeat(filled)}${"░".repeat(LOAD_BAR - filled)}\n  loading ${loadDone}/${loadTotal}`
+}
+
+const setLoading = (done: number, total: number) => {
+  loadDone = done
+  loadTotal = total
+  paintLoading()
+}
+
+const takePhoto = async (file: File, path: string) => {
+  const photo = await photoFromFile(file, path)
+  photoByPath.set(path, photos.length)
+  photos.push(photo)
+  if (COUNT < settings.sphereCount) spawnPoint(photos.length - 1)
+  else restockQueues()
+}
+
+const addFolder = async (files: FolderFile[]) => {
+  if (!files.length) return
+  resetLibrary()
+  folderTree = treeFromFiles(files)
+  rebuildPoints(0)
+  const images = shuffle(files.filter((item) => isImageFile(item.file, item.path)))
+  setLoading(0, images.length)
+  for (const [i, { file, path }] of images.entries()) {
+    try {
+      await takePhoto(file, path)
+    } catch {
+      /* skip undecodable files */
+    }
+    setLoading(i + 1, images.length)
+    imageCount.textContent = `${photos.length} image${photos.length === 1 ? "" : "s"}`
+  }
+  setLoading(images.length, images.length)
+  updateImageUi()
+  setFocusedPath(photos[0]?.path ?? null)
+}
+
+const loadDemo = async () => {
+  setLoading(0, -1)
+  const index = await loadDemoIndex()
+  const entries = shuffle(index.filter((entry) => isImagePath(entry.path, entry.type)))
+  if (!entries.length) {
+    setLoading(0, 0)
+    return
+  }
+  resetLibrary()
+  folderTree = treeFromFiles(
+    entries.map((entry) => ({
+      file: new File([], entry.path.split("/").pop() ?? "file", {
+        type: entry.type,
+        lastModified: entry.modified,
+      }),
+      path: entry.path,
+    })),
+  )
+  rebuildPoints(0)
+  setLoading(0, entries.length)
+  const loaded: FolderFile[] = []
+  for (const [i, entry] of entries.entries()) {
+    try {
+      const item = await fetchDemoFile(entry)
+      if (item) {
+        await takePhoto(item.file, item.path)
+        loaded.push(item)
+      }
+    } catch {
+      /* skip missing or undecodable files */
+    }
+    setLoading(i + 1, entries.length)
+    imageCount.textContent = `${photos.length} image${photos.length === 1 ? "" : "s"}`
+  }
+  if (loaded.length) folderTree = treeFromFiles(loaded)
+  setLoading(entries.length, entries.length)
+  updateImageUi()
+  setFocusedPath(photos[0]?.path ?? null)
 }
 
 const clearAllImages = () => {
-  for (const photo of photos) disposePhoto(photo)
-  photos.length = 0
+  resetLibrary()
+  folderTree = null
   rebuildPoints(0)
 }
 
 fileInput.addEventListener("change", () => {
-  void addFiles([...(fileInput.files ?? [])])
+  void addFolder(filesFromList(fileInput.files ?? []))
   fileInput.value = ""
 })
-addBtn.addEventListener("click", () => fileInput.click())
 addMore.addEventListener("click", () => fileInput.click())
 clearImages.addEventListener("click", clearAllImages)
 
@@ -921,21 +1477,32 @@ document.addEventListener("dragleave", (e) => {
 })
 document.addEventListener("drop", (e) => {
   document.body.classList.remove("drag")
-  void addFiles([...(e.dataTransfer?.files ?? [])])
+  if (!e.dataTransfer) return
+  void filesFromDataTransfer(e.dataTransfer).then(addFolder)
 })
 document.addEventListener("paste", (e) => {
-  void addFiles([...(e.clipboardData?.files ?? [])])
+  void addFolder(filesFromList(e.clipboardData?.files ?? []))
 })
 
 const resize = () => {
-  const css = Math.min(innerWidth, innerHeight)
-  camera.left = -FRAME
-  camera.right = FRAME
-  camera.top = FRAME
-  camera.bottom = -FRAME
+  const cssW = innerWidth
+  const cssH = innerHeight
+  const side = Math.max(1, Math.min(cssW, cssH))
+  const worldPerPx = (2 * FRAME) / side
+  camera.left = -cssW * 0.5 * worldPerPx
+  camera.right = cssW * 0.5 * worldPerPx
+  camera.top = cssH * 0.5 * worldPerPx
+  camera.bottom = -cssH * 0.5 * worldPerPx
   camera.updateProjectionMatrix()
-  ditherPass.resize(css)
-  diskPx = css / (2 * FRAME)
+  ditherPass.resize(cssW, cssH)
+  diskPx = 1 / worldPerPx
+  const view = viewPanel.getBoundingClientRect()
+  const canvasRect = canvas.getBoundingClientRect()
+  screenToPlane(view.left + view.width * 0.5 - canvasRect.left, view.top + view.height * 0.5 - canvasRect.top, plane)
+  viewRect.x = plane.x
+  viewRect.y = plane.y
+  viewRect.w = view.width * worldPerPx
+  viewRect.h = view.height * worldPerPx
 }
 
 const rotateByPointer = (event: PointerEvent) => {
@@ -948,38 +1515,135 @@ const rotateByPointer = (event: PointerEvent) => {
   prevHit.copy(currHit)
 }
 
-canvas.addEventListener("pointerdown", (event) => {
-  pointerDown = { x: event.clientX, y: event.clientY }
+const ndcFromClient = (cx: number, cy: number) => {
+  const rect = canvas.getBoundingClientRect()
+  ndc.set(((cx - rect.left) / rect.width) * 2 - 1, -((cy - rect.top) / rect.height) * 2 + 1)
+  return ndc
+}
+
+const pointers = new Map<number, { x: number; y: number }>()
+let pinchDist = 0
+let pinching = false
+let didPinch = false
+
+const pinchPoints = () => [...pointers.values()]
+
+const pinchGap = () => {
+  const pts = pinchPoints()
+  if (pts.length < 2) return 0
+  return Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y)
+}
+
+const pinchMid = () => {
+  const pts = pinchPoints()
+  return { x: (pts[0]!.x + pts[1]!.x) * 0.5, y: (pts[0]!.y + pts[1]!.y) * 0.5 }
+}
+
+const beginPanFrom = (x: number, y: number) => {
+  pointerDown = { x, y }
   dragging = true
-  pointerNdc(event)
+  ndcFromClient(x, y)
   ndcToHemisphere(ndc.x, ndc.y, prevHit)
   lastContentQ.copy(content.quaternion)
+}
+
+canvas.addEventListener("pointerdown", (event) => {
+  if (inspectOpen) return
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   canvas.setPointerCapture(event.pointerId)
+  if (pointers.size === 1) {
+    pinching = false
+    beginPanFrom(event.clientX, event.clientY)
+    return
+  }
+  dragging = false
+  pinching = true
+  didPinch = true
+  seeking = false
+  pinchDist = pinchGap()
+  lastPinch = performance.now()
+  const mid = pinchMid()
+  ndcFromClient(mid.x, mid.y)
+  ndcToHemisphere(ndc.x, ndc.y, prevHit)
 })
 
 canvas.addEventListener("pointermove", (event) => {
+  if (!pointers.has(event.pointerId)) return
+  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
+  if (pinching && pointers.size >= 2) {
+    const now = performance.now()
+    lastPinch = now
+    const next = pinchGap()
+    if (pinchDist > 1) kickZoom((next - pinchDist) * sim.zoom * 4)
+    pinchDist = next
+    const mid = pinchMid()
+    ndcFromClient(mid.x, mid.y)
+    ndcToHemisphere(ndc.x, ndc.y, currHit)
+    if (prevHit.dot(currHit) < 0.999999) {
+      rotQ.setFromUnitVectors(prevHit, currHit)
+      content.quaternion.premultiply(rotQ)
+    }
+    prevHit.copy(currHit)
+    seeking = false
+    return
+  }
   if (!dragging) return
   if (seeking && Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5) seeking = false
   rotateByPointer(event)
 })
 
 canvas.addEventListener("pointerup", (event) => {
-  if (!dragging) return
+  if (inspectOpen) {
+    closeInspect()
+    pointers.clear()
+    dragging = false
+    pinching = false
+    return
+  }
+  pointers.delete(event.pointerId)
+  if (pointers.size >= 2) {
+    pinchDist = pinchGap()
+    return
+  }
+  if (pointers.size === 1) {
+    pinching = false
+    const rem = pinchPoints()[0]!
+    pinchDist = 0
+    beginPanFrom(rem.x, rem.y)
+    return
+  }
+  pinching = false
+  pinchDist = 0
+  if (!dragging) {
+    didPinch = false
+    return
+  }
   dragging = false
-  const dragged = Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5
+  const dragged = didPinch || Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 5
+  didPinch = false
   if (!dragged) {
     const rect = canvas.getBoundingClientRect()
     const index = pickIndexAt(event.clientX - rect.left, event.clientY - rect.top, PICK_PAD)
-    if (index >= 0) setSeek(index)
+    if (index >= 0) {
+      if (index === center) openInspect(index)
+      else setSeek(index)
+    }
     return
   }
   seeking = false
   handedOff = true
 })
 
-canvas.addEventListener("pointercancel", () => {
-  dragging = false
+canvas.addEventListener("pointercancel", (event) => {
+  pointers.delete(event.pointerId)
+  if (pointers.size === 0) {
+    dragging = false
+    pinching = false
+    didPinch = false
+  }
 })
+
+canvas.addEventListener("touchstart", (event) => event.preventDefault(), { passive: false })
 
 const isOsMomentum = (event: WheelEvent, mag: number) => {
   const phase =
@@ -1009,7 +1673,7 @@ canvas.addEventListener(
   "wheel",
   (event) => {
     event.preventDefault()
-    if (COUNT === 0) return
+    if (COUNT === 0 || inspectOpen) return
     const now = performance.now()
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? canvas.clientHeight : 1
     let dx = event.deltaX * unit
@@ -1085,20 +1749,28 @@ canvas.addEventListener("gesturechange", ignoreGesture)
 canvas.addEventListener("gestureend", ignoreGesture)
 
 addEventListener("resize", resize)
+new ResizeObserver(resize).observe(viewPanel)
 
 syncPalette()
 syncDither()
 updateImageUi()
 resize()
 lastContentQ.copy(content.quaternion)
+void loadDemo()
 
 renderer.setAnimationLoop(() => {
   const now = performance.now()
   const dt = Math.min(0.05, (now - lastTime) / 1000)
   lastTime = now
 
+  if (!loadingEl.hidden && now - lastLoadSpin > 80) {
+    lastLoadSpin = now
+    loadSpin = (loadSpin + 1) % LOAD_SPIN.length
+    paintLoading()
+  }
+
   if (COUNT === 0) {
-    ditherPass.render(scene, camera, settings)
+    present()
     return
   }
 
@@ -1130,6 +1802,10 @@ renderer.setAnimationLoop(() => {
 
   stepSpiralPose(dt)
   setSpiral()
-  projectThumbs()
-  ditherPass.render(scene, camera, settings)
+  projectThumbs(dt)
+  if (!(focusedNode && !photoByPath.has(focusedNode.path))) {
+    const photo = COUNT > 0 ? photos[imageIds[center]] : undefined
+    setFocusedPath(photo?.path ?? focusedPath)
+  }
+  present()
 })

@@ -14,9 +14,12 @@ export const MAX_PALETTE = 24
 
 export type Settings = {
   mode: ModeId
+  primary: string
+  secondary: string
   colors: string[]
   coarseness: number
   imageArea: number
+  sphereCount: number
   vignetteRadius: number
   vignetteSoftness: number
   vignetteStrength: number
@@ -24,12 +27,22 @@ export type Settings = {
 
 export const DEFAULT_SETTINGS: Settings = {
   mode: "bayer-1",
-  colors: ["#1a120c", "#c43b3b", "#e6c15c", "#f3ead8"],
+  primary: "#1a120c",
+  secondary: "#f3ead8",
+  colors: ["#c43b3b", "#e6c15c"],
   coarseness: 1,
   imageArea: 0.07,
+  sphereCount: 32,
   vignetteRadius: 0.42,
   vignetteSoftness: 0.62,
   vignetteStrength: 1,
+}
+
+export const paletteColors = (settings: Settings) => {
+  const hexes = [settings.primary, settings.secondary, ...settings.colors]
+  const unique: string[] = []
+  for (const hex of hexes) if (!unique.includes(hex)) unique.push(hex)
+  return unique.slice(0, MAX_PALETTE)
 }
 
 export const formatCoarseness = (value: number) => `${value}×`
@@ -42,16 +55,25 @@ export const bayerLevelFor = (mode: ModeId): number | null => {
   return null
 }
 
-export const settingsJson = (settings: Settings) =>
+export const settingsJson = (
+  settings: Settings,
+  extra: { projection: string; spiral: boolean; motion: Record<string, number> },
+) =>
   JSON.stringify(
     {
       mode: settings.mode,
-      colors: settings.colors,
+      primary: settings.primary,
+      secondary: settings.secondary,
+      colors: [...settings.colors],
       coarseness: settings.coarseness,
       imageArea: settings.imageArea,
+      sphereCount: settings.sphereCount,
       vignetteRadius: settings.vignetteRadius,
       vignetteSoftness: settings.vignetteSoftness,
       vignetteStrength: settings.vignetteStrength,
+      projection: extra.projection,
+      spiral: extra.spiral,
+      motion: { ...extra.motion },
     },
     null,
     2,

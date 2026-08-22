@@ -1,8 +1,8 @@
 import * as THREE from "three"
 import { applyCircularVignette, applyDither, bayerSize, generateBayer } from "./dither.ts"
 import { blueNoiseMap } from "./blueNoise.ts"
-import { ColorImage } from "./image.ts"
-import { MAX_PALETTE, bayerLevelFor, needsErrorDiffusion, type Settings } from "./settings.ts"
+import { ColorImage, parseHexColor } from "./image.ts"
+import { MAX_PALETTE, bayerLevelFor, needsErrorDiffusion, paletteColors, type Settings } from "./settings.ts"
 
 const MAX_SIZE = 1024
 
@@ -25,6 +25,7 @@ uniform vec3 uPalette[${MAX_PALETTE}];
 uniform int uPaletteSize;
 uniform float uSpread;
 uniform float uThresholdSize;
+uniform vec3 uBackground;
 uniform float uVignetteRadius;
 uniform float uVignetteSoftness;
 uniform float uVignetteStrength;
@@ -51,10 +52,13 @@ void main() {
   vec3 color = texture2D(tScene, sampleUV).rgb;
 
   vec2 p = sampleUV * 2.0 - 1.0;
+  float square = min(uResolution.x, uResolution.y);
+  p.x *= uResolution.x / square;
+  p.y *= uResolution.y / square;
   float r = length(p);
   float outer = uVignetteRadius + max(0.0001, uVignetteSoftness);
   float t = smoothstep(uVignetteRadius, outer, r);
-  color *= 1.0 - t * uVignetteStrength;
+  color = mix(color, uBackground, t * uVignetteStrength);
 
   vec2 tUV = (mod(pixel, uThresholdSize) + 0.5) / uThresholdSize;
   float thresh = texture2D(tThreshold, tUV).r;
@@ -97,6 +101,7 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
       uPaletteSize: { value: 4 },
       uSpread: { value: 1 / 3 },
       uThresholdSize: { value: 4 },
+      uBackground: { value: new THREE.Vector3() },
       uVignetteRadius: { value: 0.42 },
       uVignetteSoftness: { value: 0.62 },
       uVignetteStrength: { value: 1 },
@@ -130,32 +135,37 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
   const blitCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1)
   blitScene.add(quad)
 
-  let size = 256
-  let pixels = new Uint8Array(size * size * 4)
+  let width = 256
+  let height = 256
+  let pixels = new Uint8Array(width * height * 4)
   const scratchColor = new THREE.Color()
 
-  const resize = (css: number) => {
-    const next = Math.max(1, Math.min(MAX_SIZE, Math.round(css)))
-    if (next === size) {
-      renderer.setSize(size, size, false)
-      return size
+  const resize = (cssW: number, cssH: number) => {
+    const scale = Math.min(1, MAX_SIZE / Math.max(cssW, cssH, 1))
+    const nextW = Math.max(1, Math.round(cssW * scale))
+    const nextH = Math.max(1, Math.round(cssH * scale))
+    if (nextW === width && nextH === height) {
+      renderer.setSize(width, height, false)
+      return
     }
-    size = next
-    sceneTarget.setSize(size, size)
-    material.uniforms.uResolution.value.set(size, size)
-    pixels = new Uint8Array(size * size * 4)
-    renderer.setSize(size, size, false)
-    return size
+    width = nextW
+    height = nextH
+    sceneTarget.setSize(width, height)
+    material.uniforms.uResolution.value.set(width, height)
+    pixels = new Uint8Array(width * height * 4)
+    renderer.setSize(width, height, false)
   }
 
   const setSettings = (settings: Settings) => {
-    const colors = settings.colors.slice(0, MAX_PALETTE)
+    const colors = paletteColors(settings)
     material.uniforms.uPaletteSize.value = colors.length
     material.uniforms.uSpread.value = colors.length > 1 ? 1 / (colors.length - 1) : 0.5
     for (let i = 0; i < MAX_PALETTE; i++) {
       scratchColor.set(colors[Math.min(i, colors.length - 1)] ?? "#000000")
       palette[i]!.set(scratchColor.r, scratchColor.g, scratchColor.b)
     }
+    scratchColor.set(settings.primary)
+    material.uniforms.uBackground.value.set(scratchColor.r, scratchColor.g, scratchColor.b)
     material.uniforms.uCoarseness.value = Math.max(1, settings.coarseness)
     material.uniforms.uVignetteRadius.value = settings.vignetteRadius
     material.uniforms.uVignetteSoftness.value = settings.vignetteSoftness
@@ -172,19 +182,26 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
   }
 
   const ditherCpu = (settings: Settings) => {
-    renderer.readRenderTargetPixels(sceneTarget, 0, 0, size, size, pixels)
-    const image = new ImageData(size, size)
-    for (let y = 0; y < size; y++) {
-      const src = (size - 1 - y) * size * 4
-      const dst = y * size * 4
-      image.data.set(pixels.subarray(src, src + size * 4), dst)
+    renderer.readRenderTargetPixels(sceneTarget, 0, 0, width, height, pixels)
+    const image = new ImageData(width, height)
+    for (let y = 0; y < height; y++) {
+      const src = (height - 1 - y) * width * 4
+      const dst = y * width * 4
+      image.data.set(pixels.subarray(src, src + width * 4), dst)
     }
-    const color = ColorImage.fromImageData(image, [0, 0, 0])
-    applyCircularVignette(color, settings.vignetteRadius, settings.vignetteSoftness, settings.vignetteStrength)
+    const background = parseHexColor(settings.primary)
+    const color = ColorImage.fromImageData(image, background)
+    applyCircularVignette(
+      color,
+      settings.vignetteRadius,
+      settings.vignetteSoftness,
+      settings.vignetteStrength,
+      background,
+    )
     const dithered = applyDither(color, settings).toImageData()
-    if (cpuCanvas.width !== size || cpuCanvas.height !== size) {
-      cpuCanvas.width = size
-      cpuCanvas.height = size
+    if (cpuCanvas.width !== width || cpuCanvas.height !== height) {
+      cpuCanvas.width = width
+      cpuCanvas.height = height
     }
     cpuCtx.putImageData(dithered, 0, 0)
     cpuTexture.needsUpdate = true
