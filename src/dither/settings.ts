@@ -28,7 +28,7 @@ export type Settings = {
 export const DEFAULT_SETTINGS: Settings = {
   mode: "bayer-1",
   primary: "#33302e",
-  secondary: "#265941",
+  secondary: "#69c846",
   colors: ["#6d7678", "#31af89", "#4d8999"],
   coarseness: 1,
   imageArea: 0.07,
