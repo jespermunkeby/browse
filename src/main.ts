@@ -18,13 +18,22 @@ import { reassign } from "./assign.ts"
 import {
   DEFAULT_SETTINGS,
   MAX_PALETTE,
+  MIN_IMAGE_PALETTE,
   MODES,
+  PALETTE_SOURCES,
+  PALETTE_STRATEGIES,
+  clampFade,
   formatCoarseness,
+  formatFade,
   settingsJson,
+  themeColors,
   type ModeId,
+  type PaletteSourceId,
+  type PaletteStrategyId,
   type Settings,
 } from "./dither/settings.ts"
 import { createDitherPass } from "./dither/pass.ts"
+import { extractPalette, hexToRgb, mixPalette, remapPalette, rgbToHex, type RGB } from "./dither/extract.ts"
 import { disposePhoto, isImageFile, isImagePath, photoFromFile, photoSize, type Photo } from "./photos.ts"
 import {
   filesFromDataTransfer,
@@ -37,6 +46,7 @@ import {
 } from "./folder.ts"
 import { renderMeta, type MetaSource } from "./meta.ts"
 import { fetchDemoFile, loadDemoIndex } from "./defaultFolder.ts"
+import { createScramble } from "./scramble.ts"
 
 const sim = {
   spring: 0.2,
@@ -96,6 +106,16 @@ const addMore = document.querySelector<HTMLButtonElement>("#addMore")!
 const clearImages = document.querySelector<HTMLButtonElement>("#clearImages")!
 const imageCount = document.querySelector<HTMLElement>("#imageCount")!
 const paletteEl = document.querySelector<HTMLElement>("#palette")!
+const paletteHint = document.querySelector<HTMLElement>("#paletteHint")!
+const paletteSourceSelect = document.querySelector<HTMLSelectElement>("#paletteSource")!
+const imagePaletteFields = document.querySelector<HTMLElement>("#imagePaletteFields")!
+const imageColorCountInput = document.querySelector<HTMLInputElement>("#imageColorCount")!
+const imageColorCountVal = document.querySelector<HTMLElement>("#imageColorCountVal")!
+const paletteStrategySelect = document.querySelector<HTMLSelectElement>("#paletteStrategy")!
+const paletteFadeInput = document.querySelector<HTMLInputElement>("#paletteFade")!
+const paletteFadeVal = document.querySelector<HTMLElement>("#paletteFadeVal")!
+const primaryField = document.querySelector<HTMLElement>("#primaryField")!
+const secondaryField = document.querySelector<HTMLElement>("#secondaryField")!
 const primaryColor = document.querySelector<HTMLInputElement>("#primaryColor")!
 const secondaryColor = document.querySelector<HTMLInputElement>("#secondaryColor")!
 const addColor = document.querySelector<HTMLButtonElement>("#addColor")!
@@ -110,6 +130,8 @@ const imageAreaInput = document.querySelector<HTMLInputElement>("#imageArea")!
 const areaVal = document.querySelector<HTMLElement>("#areaVal")!
 const sphereCountInput = document.querySelector<HTMLInputElement>("#sphereCount")!
 const sphereCountVal = document.querySelector<HTMLElement>("#sphereCountVal")!
+const focusOriginalColorCheck = document.querySelector<HTMLInputElement>("#focusOriginalColor")!
+const focusUnditheredCheck = document.querySelector<HTMLInputElement>("#focusUndithered")!
 const loadingEl = document.querySelector<HTMLElement>("#loading")!
 const loadingText = document.querySelector<HTMLElement>("#loadingText")!
 const vignetteRadiusInput = document.querySelector<HTMLInputElement>("#vignetteRadius")!
@@ -131,12 +153,19 @@ const projections: { id: ProjectionId; label: string }[] = [
 const settings: Settings = {
   ...DEFAULT_SETTINGS,
   colors: [...DEFAULT_SETTINGS.colors],
+  imageColors: [...DEFAULT_SETTINGS.imageColors],
 }
 const photos: Photo[] = []
 const photoByPath = new Map<string, number>()
+const imagePaletteCache = new Map<string, string[]>()
 let folderTree: TreeNode | null = null
 let focusedPath: string | null = null
 let focusedNode: TreeNode | null = null
+let lastPaletteKey = ""
+let paletteLive: RGB[] = []
+let paletteTarget: RGB[] = []
+let paletteFrom: RGB[] = []
+let paletteMix = 1
 
 let showSpiral = false
 let projection: ProjectionId = "stereo"
@@ -175,11 +204,33 @@ for (const item of MODES) {
   modeSelect.append(el)
 }
 modeSelect.value = settings.mode
+
+for (const item of PALETTE_SOURCES) {
+  const el = document.createElement("option")
+  el.value = item.id
+  el.textContent = item.label
+  paletteSourceSelect.append(el)
+}
+paletteSourceSelect.value = settings.paletteSource
+
+for (const item of PALETTE_STRATEGIES) {
+  const el = document.createElement("option")
+  el.value = item.id
+  el.textContent = item.label
+  paletteStrategySelect.append(el)
+}
+paletteStrategySelect.value = settings.paletteStrategy
+imageColorCountInput.min = String(MIN_IMAGE_PALETTE)
+imageColorCountInput.max = String(MAX_PALETTE)
+imageColorCountInput.value = String(settings.imageColorCount)
+paletteFadeInput.value = String(settings.paletteFade)
 coarsenessInput.value = String(Math.round(Math.log2(settings.coarseness)))
 imageAreaInput.value = String(settings.imageArea)
 sphereCountInput.min = String(MIN_COUNT)
 sphereCountInput.max = String(MAX_COUNT)
 sphereCountInput.value = String(settings.sphereCount)
+focusOriginalColorCheck.checked = settings.focusOriginalColor
+focusUnditheredCheck.checked = settings.focusUndithered
 vignetteRadiusInput.value = String(settings.vignetteRadius)
 vignetteSoftnessInput.value = String(settings.vignetteSoftness)
 vignetteStrengthInput.value = String(settings.vignetteStrength)
@@ -210,8 +261,9 @@ renderer.setPixelRatio(1)
 renderer.outputColorSpace = THREE.SRGBColorSpace
 renderer.setClearColor(settings.primary, 1)
 
+const themeBg = new THREE.Color(settings.primary)
 const scene = new THREE.Scene()
-scene.background = new THREE.Color(settings.primary)
+scene.background = themeBg
 
 const camera = new THREE.OrthographicCamera(-FRAME, FRAME, FRAME, -FRAME, -10, 10)
 camera.position.set(0, 0, 5)
@@ -243,16 +295,7 @@ for (let i = 0; i < MAX_COUNT; i++) {
 }
 
 const overlayScene = new THREE.Scene()
-const overlay = new THREE.Mesh(
-  thumbGeo,
-  new THREE.MeshBasicMaterial({
-    transparent: true,
-    opacity: 0,
-    depthTest: false,
-    depthWrite: false,
-    toneMapped: false,
-  }),
-)
+const overlay = new THREE.Mesh(thumbGeo, ditherPass.focusMaterial)
 overlay.frustumCulled = false
 overlay.visible = false
 overlayScene.add(overlay)
@@ -323,6 +366,7 @@ const spiralPos = new Float32Array(SPIRAL_MAX_POINTS * 3)
 const spiralCol = new Float32Array(SPIRAL_MAX_POINTS * 3)
 let growth = 0
 let zoomVel = 0
+let growZoom = false
 let center = 0
 let twist = 0
 let aimed = -1
@@ -443,29 +487,131 @@ const photoMeta = (photo: Photo): MetaSource => ({
   height: photo.height,
 })
 
+const chrome = createScramble([metaEl])
+
 const syncTree = () => renderTree(folderTree, treeEl, focusedPath, (node) => setFocusFromTree(node))
 
 const syncMeta = () => {
   if (focusedNode) {
     renderMeta(metaEl, fileMeta(focusedNode))
-    return
-  }
-  if (focusedPath) {
+  } else if (focusedPath) {
     const photoIndex = photoByPath.get(focusedPath)
     const photo = photoIndex === undefined ? undefined : photos[photoIndex]
     renderMeta(metaEl, photo ? photoMeta(photo) : null)
-    return
+  } else {
+    renderMeta(metaEl, null)
   }
-  renderMeta(metaEl, null)
+  chrome.invalidate()
 }
+
+const cssRgb = (c: RGB) => `rgb(${c[0] * 255} ${c[1] * 255} ${c[2] * 255})`
 
 const setFocusedPath = (path: string | null) => {
   const nextNode = path ? findFile(folderTree, path) : null
   if (path === focusedPath && nextNode === focusedNode) return
   focusedPath = path
   focusedNode = nextNode
+  const rebuilt = applyImagePalette()
+  if (rebuilt) {
+    syncPalette()
+    syncDither()
+  }
   syncTree()
   syncMeta()
+}
+
+const photoAtPath = (path: string | null) => {
+  if (!path) return undefined
+  const index = photoByPath.get(path)
+  return index === undefined ? undefined : photos[index]
+}
+
+const customPaletteRgb = (): RGB[] =>
+  [settings.primary, settings.secondary, ...settings.colors].map(hexToRgb)
+
+const commitLivePalette = (rebuild: boolean) => {
+  settings.imageColors = paletteLive.map(rgbToHex)
+  if (rebuild) syncPalette()
+  else paintImageSwatches()
+  applyTheme()
+  if (rebuild) ditherPass.setSettings(settings)
+  if (paletteLive.length) ditherPass.setPaletteRgb(paletteLive)
+}
+
+const paintImageSwatches = () => {
+  if (settings.paletteSource !== "image") return
+  const chips = paletteEl.querySelectorAll<HTMLElement>(".swatch-chip")
+  if (chips.length !== paletteLive.length) {
+    settings.imageColors = paletteLive.map(rgbToHex)
+    syncPalette()
+    return
+  }
+  for (const [i, c] of paletteLive.entries()) {
+    const chip = chips[i]!
+    chip.style.background = cssRgb(c)
+    chip.title = rgbToHex(c)
+  }
+}
+
+const snapPaletteTo = (next: RGB[]) => {
+  paletteTarget = next.map((c) => [c[0], c[1], c[2]] as RGB)
+  paletteFrom = paletteTarget.map((c) => [c[0], c[1], c[2]] as RGB)
+  paletteLive = paletteTarget.map((c) => [c[0], c[1], c[2]] as RGB)
+  paletteMix = 1
+}
+
+const beginPaletteFade = (next: RGB[]) => {
+  if (settings.paletteFade <= 1e-3) {
+    snapPaletteTo(next)
+    return
+  }
+  if (!paletteLive.length) paletteLive = remapPalette(customPaletteRgb(), next.length)
+  else if (paletteLive.length !== next.length) paletteLive = remapPalette(paletteLive, next.length)
+  paletteFrom = paletteLive.map((c) => [c[0], c[1], c[2]] as RGB)
+  paletteTarget = next.map((c) => [c[0], c[1], c[2]] as RGB)
+  paletteLive = paletteFrom.map((c) => [c[0], c[1], c[2]] as RGB)
+  paletteMix = 0
+}
+
+const applyImagePalette = (force = false) => {
+  if (settings.paletteSource !== "image") {
+    paletteLive = []
+    paletteTarget = []
+    paletteFrom = []
+    paletteMix = 1
+    lastPaletteKey = ""
+    return false
+  }
+  const photo = photoAtPath(focusedPath)
+  const key = `${photo?.path ?? ""}:${settings.paletteStrategy}:${settings.imageColorCount}`
+  if (!force && key === lastPaletteKey && (photo || settings.imageColors.length > 0)) return false
+  lastPaletteKey = key
+  if (!photo) return false
+  let colors = imagePaletteCache.get(key)
+  if (!colors) {
+    colors = extractPalette(photo.source, settings.imageColorCount, settings.paletteStrategy)
+    imagePaletteCache.set(key, colors)
+  }
+  const next = colors.map(hexToRgb)
+  const same =
+    next.length === paletteTarget.length &&
+    next.every((c, i) => {
+      const t = paletteTarget[i]!
+      return c[0] === t[0] && c[1] === t[1] && c[2] === t[2]
+    })
+  if (same && paletteMix >= 1 && paletteLive.length === next.length) return false
+  const prevLen = settings.imageColors.length
+  beginPaletteFade(next)
+  settings.imageColors = paletteLive.map(rgbToHex)
+  return paletteMix >= 1 || settings.imageColors.length !== prevLen
+}
+
+const stepImagePalette = (dt: number) => {
+  if (settings.paletteSource !== "image" || paletteTarget.length === 0 || paletteMix >= 1) return
+  const tau = settings.paletteFade
+  paletteMix = tau <= 1e-3 ? 1 : Math.min(1, paletteMix + dt / tau)
+  paletteLive = mixPalette(paletteFrom, paletteTarget, paletteMix)
+  commitLivePalette(false)
 }
 
 const markerForPhoto = (photoIndex: number) => {
@@ -548,36 +694,45 @@ const springInspect = (dt: number, tx: number, ty: number, tw: number, th: numbe
   step(inspectScale, inspectScaleVel, inspectTargetScale)
 }
 
-const inspectReveal = (photo: Photo) => {
-  const rest = thumbSize(photo, true)
-  const fill = inspectFit(photo.aspect)
+const colorReveal = (photo: Photo, sx: number, sy: number) => {
+  const rest = thumbSize(photo)
   const restLen = Math.hypot(rest.w, rest.h)
-  const fillLen = Math.hypot(fill.w, fill.h)
-  const curLen = Math.hypot(inspectScale.x, inspectScale.y)
-  const span = fillLen - restLen
-  if (span <= 1e-8) return inspectOpen ? 1 : 0
-  return Math.min(1, Math.max(0, (curLen - restLen) / span))
+  const focusLen = restLen * FOCUS_SCALE
+  const curLen = Math.hypot(sx, sy)
+  const span = focusLen - restLen
+  if (span <= 1e-8) return curLen > restLen * 1.02 ? 1 : 0
+  const t = (curLen - restLen) / span
+  return Math.min(1, Math.max(0, t / 0.55))
 }
 
 const hideOverlay = () => {
   overlay.visible = false
-  overlay.material.opacity = 0
+  ditherPass.setFocusOverlay(null, 0, true, true)
 }
 
-const syncOverlay = (photo: Photo, x: number, y: number, sx: number, sy: number) => {
-  overlay.visible = true
+const syncOverlay = (
+  photo: Photo,
+  x: number,
+  y: number,
+  sx: number,
+  sy: number,
+  opacity: number,
+  inspect: boolean,
+) => {
+  overlay.visible = opacity > 0.001
   overlay.position.set(x, y, 0)
   overlay.scale.set(sx, sy, 1)
-  overlay.material.opacity = inspectReveal(photo)
-  if (overlay.material.map !== photo.texture) {
-    overlay.material.map = photo.texture
-    overlay.material.needsUpdate = true
-  }
+  ditherPass.setFocusOverlay(
+    photo.texture,
+    opacity,
+    inspect || settings.focusOriginalColor,
+    inspect || settings.focusUndithered,
+  )
 }
 
 const present = () => {
   ditherPass.render(scene, camera, settings)
-  if (!overlay.visible || overlay.material.opacity <= 0) return
+  if (!overlay.visible) return
   const prev = renderer.autoClear
   renderer.autoClear = false
   renderer.render(overlayScene, camera)
@@ -593,6 +748,13 @@ const inspectSettled = () =>
 const projectThumbs = (dt: number) => {
   stepFocusScale(dt)
   let inspectShown = false
+  let overlayPhoto: Photo | undefined
+  let overlayInspect = false
+  let overlayX = 0
+  let overlayY = 0
+  let overlaySx = 0
+  let overlaySy = 0
+  let overlayOp = 0
   for (let i = 0; i < MAX_COUNT; i++) {
     const mesh = thumbs[i]!
     if (i >= COUNT) {
@@ -640,7 +802,6 @@ const projectThumbs = (dt: number) => {
       sx = inspectScale.x
       sy = inspectScale.y
       mesh.renderOrder = 10
-      syncOverlay(photo, x, y, sx, sy)
     } else {
       mesh.renderOrder = i === center ? 6 : 3
     }
@@ -651,15 +812,25 @@ const projectThumbs = (dt: number) => {
       mesh.material.map = photo.texture
       mesh.material.needsUpdate = true
     }
+    const reveal = colorReveal(photo, sx, sy)
+    const focusLook = settings.focusOriginalColor || settings.focusUndithered
+    if (inspecting || (!overlayPhoto && i === center && reveal > 0.001 && focusLook)) {
+      overlayPhoto = photo
+      overlayInspect = inspecting
+      overlayX = x
+      overlayY = y
+      overlaySx = sx
+      overlaySy = sy
+      overlayOp = reveal
+    }
   }
   if (inspectPhoto >= 0 && !inspectShown) {
     inspectOpen = false
     inspectPhoto = -1
     inspectSeeded = false
-    hideOverlay()
-  } else if (inspectPhoto < 0) {
-    hideOverlay()
   }
+  if (overlayPhoto) syncOverlay(overlayPhoto, overlayX, overlayY, overlaySx, overlaySy, overlayOp, overlayInspect)
+  else hideOverlay()
 }
 
 const readPositions = () => {
@@ -824,26 +995,87 @@ const slideOnLattice = () => {
   prevLattice.set(seek)
 }
 
-const syncSlotsToGrowth = () => {
-  const { kMin, kMax } = slotRange(growth)
+const copyTriple = (src: Float32Array, from: number, dst: Float32Array, to: number) => {
+  const a = from * 3
+  const b = to * 3
+  dst[b] = src[a]!
+  dst[b + 1] = src[a + 1]!
+  dst[b + 2] = src[a + 2]!
+}
+
+const liveCap = () => Math.min(MAX_COUNT, photos.length)
+
+const syncSphereCount = () => {
+  if (COUNT < MIN_COUNT) return
+  settings.sphereCount = COUNT
+  sphereCountInput.value = String(COUNT)
+  sphereCountVal.textContent = String(COUNT)
+}
+
+const dropPoint = (i: number) => {
+  const last = COUNT - 1
+  thumbs[last]!.visible = false
+  if (i !== last) {
+    imageIds[i] = imageIds[last]!
+    slotK[i] = slotK[last]!
+    remapped[i] = remapped[last]!
+    focusMul[i] = focusMul[last]!
+    copyTriple(velocity, last, velocity, i)
+    copyTriple(seek, last, seek, i)
+    copyTriple(prevLattice, last, prevLattice, i)
+    marker(i).position.copy(marker(last).position)
+  }
+  markers.remove(marker(last))
+  setCount(last)
+}
+
+const addPoint = (k: number, photoIndex: number) => {
+  const i = COUNT
+  if (i >= MAX_COUNT) return
+  setCount(i + 1)
+  const node = new THREE.Object3D()
+  node.userData.index = i
+  imageIds[i] = photoIndex
+  slotK[i] = k
+  remapped[i] = 1
+  focusMul[i] = 1
+  if (i === 0) {
+    const point = slotPoint(k, growth)
+    node.position.set(point[0], point[1], point[2])
+    poleDir.copy(node.position).normalize()
+    writeLatticePose(poleDir, twist, poseNow)
+    poseVel.set(0, 0, 0)
+    lastContentQ.copy(content.quaternion)
+    center = 0
+    focusCandidate = 0
+    seeking = true
+  } else {
+    node.position.copy(marker(0).position)
+  }
+  markers.add(node)
+  velocity[i * 3] = 0
+  velocity[i * 3 + 1] = 0
+  velocity[i * 3 + 2] = 0
+}
+
+const remapWindow = (kMin: number, kMax: number) => {
   const span = kMax - kMin + 1
   occupied.fill(0, 0, span)
-  remapped.fill(0)
   for (let i = 0; i < COUNT; i++) {
-    const k = slotK[i]
+    const k = slotK[i]!
     if (k >= kMin && k <= kMax) occupied[k - kMin] = 1
   }
   let enteringN = 0
   for (let k = kMin; k <= kMax; k++) if (!occupied[k - kMin]) entering[enteringN++] = k
   for (let i = 0; i < COUNT; i++) {
-    if (slotK[i] >= kMin && slotK[i] <= kMax) continue
+    if (slotK[i]! >= kMin && slotK[i]! <= kMax) continue
     if (enteringN === 0) continue
-    const next = entering[--enteringN]
-    if (slotK[i] > kMax) {
-      behind.push(imageIds[i])
+    const next = entering[--enteringN]!
+    if (slotK[i]! > kMax) {
+      behind.push(imageIds[i]!)
       imageIds[i] = takeId(ahead, behind)
     } else {
-      ahead.push(imageIds[i])
+      ahead.push(imageIds[i]!)
       imageIds[i] = takeId(behind, ahead)
     }
     slotK[i] = next
@@ -851,12 +1083,55 @@ const syncSlotsToGrowth = () => {
   }
 }
 
-const kickZoom = (impulse: number) => {
+const growWindow = (kMin: number, kMax: number) => {
+  let i = 0
+  while (i < COUNT) {
+    const k = slotK[i]!
+    if (k >= kMin && k <= kMax) {
+      i++
+      continue
+    }
+    if (k > kMax) behind.push(imageIds[i]!)
+    else ahead.push(imageIds[i]!)
+    dropPoint(i)
+  }
+  const span = kMax - kMin + 1
+  occupied.fill(0, 0, span)
+  for (let j = 0; j < COUNT; j++) occupied[slotK[j]! - kMin] = 1
+  for (let k = kMin; k <= kMax; k++) {
+    if (occupied[k - kMin] || COUNT >= liveCap()) continue
+    addPoint(k, takeId(ahead, behind))
+  }
+}
+
+const syncSlotsToGrowth = () => {
+  remapped.fill(0)
+  const kMin = Math.ceil(-growth)
+  const cap = liveCap()
+  if (growZoom && COUNT > 0 && cap >= MIN_COUNT) {
+    let heldMax = kMin - 1
+    for (let i = 0; i < COUNT; i++) if (slotK[i]! > heldMax) heldMax = slotK[i]!
+    const desired = heldMax - kMin + 1
+    if (desired >= MIN_COUNT && desired <= cap) {
+      growWindow(kMin, kMin + desired - 1)
+      if (COUNT !== settings.sphereCount) {
+        syncSphereCount()
+        lastSpiralGrowth = Number.NaN
+      }
+      return
+    }
+  }
+  const { kMax } = slotRange(growth)
+  remapWindow(kMin, kMax)
+}
+
+const kickZoom = (impulse: number, grow = false) => {
   if (impulse === 0 || inspectOpen || COUNT === 0) return
   if (!zooming()) {
     captureLattice()
     focusCandidate = center
   }
+  growZoom = grow
   zoomVel += impulse
 }
 
@@ -1058,6 +1333,7 @@ const rebuildPoints = (n: number) => {
   ahead.length = 0
   growth = 0
   zoomVel = 0
+  growZoom = false
   twist = 0
   center = 0
   focusCandidate = -1
@@ -1096,27 +1372,64 @@ const updateSettingLabels = () => {
   vigRadiusVal.textContent = settings.vignetteRadius.toFixed(2)
   vigSoftVal.textContent = settings.vignetteSoftness.toFixed(2)
   vigStrVal.textContent = settings.vignetteStrength.toFixed(2)
+  imageColorCountVal.textContent = String(settings.imageColorCount)
+  paletteFadeVal.textContent = formatFade(settings.paletteFade)
 }
 
 const applyTheme = () => {
-  document.documentElement.style.setProperty("--primary", settings.primary)
-  document.documentElement.style.setProperty("--secondary", settings.secondary)
-  renderer.setClearColor(settings.primary, 1)
-  scene.background = new THREE.Color(settings.primary)
+  if (settings.paletteSource === "image" && paletteLive.length) {
+    const primary = paletteLive[0]!
+    const secondary = paletteLive[paletteLive.length - 1]!
+    document.documentElement.style.setProperty("--primary", cssRgb(primary))
+    document.documentElement.style.setProperty("--secondary", cssRgb(secondary))
+    themeBg.setRGB(primary[0], primary[1], primary[2])
+    renderer.setClearColor(themeBg, 1)
+    scene.background = themeBg
+    return
+  }
+  const theme = themeColors(settings)
+  document.documentElement.style.setProperty("--primary", theme.primary)
+  document.documentElement.style.setProperty("--secondary", theme.secondary)
+  themeBg.set(theme.primary)
+  renderer.setClearColor(themeBg, 1)
+  scene.background = themeBg
 }
 
 const syncDither = () => {
   updateSettingLabels()
   applyTheme()
   ditherPass.setSettings(settings)
+  if (settings.paletteSource === "image" && paletteLive.length) ditherPass.setPaletteRgb(paletteLive)
 }
 
 const extraColorCap = Math.max(0, MAX_PALETTE - 2)
 
 const syncPalette = () => {
+  const fromImage = settings.paletteSource === "image"
+  paletteSourceSelect.value = settings.paletteSource
+  paletteStrategySelect.value = settings.paletteStrategy
+  imagePaletteFields.hidden = !fromImage
+  primaryField.hidden = fromImage
+  secondaryField.hidden = fromImage
+  addColor.hidden = fromImage
   primaryColor.value = settings.primary
   secondaryColor.value = settings.secondary
   paletteEl.replaceChildren()
+  if (fromImage) {
+    const empty = settings.imageColors.length === 0
+    paletteHint.hidden = !empty
+    paletteHint.textContent = "Focus an image to sample its palette"
+    for (const hex of settings.imageColors) {
+      const chip = document.createElement("div")
+      chip.className = "swatch-chip"
+      chip.style.background = hex
+      chip.title = hex
+      paletteEl.append(chip)
+    }
+    updateSettingLabels()
+    return
+  }
+  paletteHint.hidden = true
   for (const [i, hex] of settings.colors.entries()) {
     const label = document.createElement("label")
     label.className = "swatch"
@@ -1149,6 +1462,36 @@ modeSelect.addEventListener("change", () => {
   settings.mode = modeSelect.value as ModeId
   syncDither()
 })
+paletteSourceSelect.addEventListener("change", () => {
+  settings.paletteSource = paletteSourceSelect.value as PaletteSourceId
+  lastPaletteKey = ""
+  applyImagePalette(true)
+  syncPalette()
+  syncDither()
+})
+paletteStrategySelect.addEventListener("change", () => {
+  settings.paletteStrategy = paletteStrategySelect.value as PaletteStrategyId
+  applyImagePalette(true)
+  syncPalette()
+  syncDither()
+})
+imageColorCountInput.addEventListener("input", () => {
+  settings.imageColorCount = Math.min(
+    MAX_PALETTE,
+    Math.max(MIN_IMAGE_PALETTE, Math.round(Number(imageColorCountInput.value))),
+  )
+  applyImagePalette(true)
+  syncPalette()
+  syncDither()
+})
+paletteFadeInput.addEventListener("input", () => {
+  settings.paletteFade = clampFade(Number(paletteFadeInput.value))
+  updateSettingLabels()
+  if (settings.paletteFade <= 1e-3 && paletteTarget.length) {
+    snapPaletteTo(paletteTarget)
+    commitLivePalette(true)
+  }
+})
 coarsenessInput.addEventListener("input", () => {
   settings.coarseness = 2 ** Number(coarsenessInput.value)
   syncDither()
@@ -1156,6 +1499,12 @@ coarsenessInput.addEventListener("input", () => {
 imageAreaInput.addEventListener("input", () => {
   settings.imageArea = Number(imageAreaInput.value)
   updateSettingLabels()
+})
+focusOriginalColorCheck.addEventListener("change", () => {
+  settings.focusOriginalColor = focusOriginalColorCheck.checked
+})
+focusUnditheredCheck.addEventListener("change", () => {
+  settings.focusUndithered = focusUnditheredCheck.checked
 })
 sphereCountInput.addEventListener("input", () => {
   settings.sphereCount = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(Number(sphereCountInput.value))))
@@ -1199,6 +1548,22 @@ const applySnapshot = (raw: unknown) => {
     settings.mode = o.mode as ModeId
     modeSelect.value = settings.mode
   }
+  if (typeof o.paletteSource === "string" && PALETTE_SOURCES.some((item) => item.id === o.paletteSource)) {
+    settings.paletteSource = o.paletteSource as PaletteSourceId
+    paletteSourceSelect.value = settings.paletteSource
+  }
+  if (typeof o.paletteStrategy === "string" && PALETTE_STRATEGIES.some((item) => item.id === o.paletteStrategy)) {
+    settings.paletteStrategy = o.paletteStrategy as PaletteStrategyId
+    paletteStrategySelect.value = settings.paletteStrategy
+  }
+  if (typeof o.imageColorCount === "number") {
+    settings.imageColorCount = Math.min(MAX_PALETTE, Math.max(MIN_IMAGE_PALETTE, Math.round(o.imageColorCount)))
+    imageColorCountInput.value = String(settings.imageColorCount)
+  }
+  if (typeof o.paletteFade === "number" && o.paletteFade >= 0) {
+    settings.paletteFade = clampFade(o.paletteFade)
+    paletteFadeInput.value = String(settings.paletteFade)
+  }
   const primary = asHex(o.primary)
   if (primary) settings.primary = primary
   const secondary = asHex(o.secondary)
@@ -1218,6 +1583,14 @@ const applySnapshot = (raw: unknown) => {
   if (typeof o.sphereCount === "number") {
     settings.sphereCount = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(o.sphereCount)))
     sphereCountInput.value = String(settings.sphereCount)
+  }
+  if (typeof o.focusOriginalColor === "boolean") {
+    settings.focusOriginalColor = o.focusOriginalColor
+    focusOriginalColorCheck.checked = settings.focusOriginalColor
+  }
+  if (typeof o.focusUndithered === "boolean") {
+    settings.focusUndithered = o.focusUndithered
+    focusUnditheredCheck.checked = settings.focusUndithered
   }
   if (typeof o.vignetteRadius === "number") {
     settings.vignetteRadius = o.vignetteRadius
@@ -1253,6 +1626,8 @@ const applySnapshot = (raw: unknown) => {
       ctrl.value.textContent = formatTweak(sim[field.key], field.step)
     }
   }
+  lastPaletteKey = ""
+  applyImagePalette(true)
   syncPalette()
   syncDither()
   if (photos.length && typeof o.sphereCount === "number") {
@@ -1286,12 +1661,24 @@ const resetLibrary = () => {
   for (const photo of photos) disposePhoto(photo)
   photos.length = 0
   photoByPath.clear()
+  imagePaletteCache.clear()
+  lastPaletteKey = ""
+  paletteLive = []
+  paletteTarget = []
+  paletteFrom = []
+  paletteMix = 1
+  const hadImageColors = settings.imageColors.length > 0
+  settings.imageColors = []
   focusedPath = null
   focusedNode = null
   inspectOpen = false
   inspectPhoto = -1
   inspectSeeded = false
   hideOverlay()
+  if (hadImageColors) {
+    syncPalette()
+    syncDither()
+  }
 }
 
 const shuffle = <T>(items: T[]) => {
@@ -1497,14 +1884,23 @@ const PINCH_ZOOM = 12
 const pointers = new Map<number, { x: number; y: number }>()
 let pinchDist = 0
 let pinching = false
+let pinchGrow = false
 let didPinch = false
 
 const pinchPoints = () => [...pointers.values()]
 
 const pinchGap = () => {
   const pts = pinchPoints()
-  if (pts.length < 2) return 0
-  return Math.hypot(pts[0]!.x - pts[1]!.x, pts[0]!.y - pts[1]!.y)
+  const n = pts.length
+  if (n < 2) return 0
+  let max = 0
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const d = Math.hypot(pts[i]!.x - pts[j]!.x, pts[i]!.y - pts[j]!.y)
+      if (d > max) max = d
+    }
+  }
+  return max
 }
 
 const beginPanFrom = (x: number, y: number) => {
@@ -1528,6 +1924,7 @@ canvas.addEventListener("pointerdown", (event) => {
   didPinch = true
   seeking = false
   alignVel.set(0, 0, 0)
+  pinchGrow = pointers.size >= 3
   pinchDist = pinchGap()
   lastPinch = performance.now()
 })
@@ -1536,9 +1933,16 @@ canvas.addEventListener("pointermove", (event) => {
   if (!pointers.has(event.pointerId)) return
   pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
   if (pinching && pointers.size >= 2) {
+    const grow = pointers.size >= 3 || event.shiftKey
+    if (grow !== pinchGrow) {
+      pinchGrow = grow
+      pinchDist = pinchGap()
+      lastPinch = performance.now()
+      return
+    }
     lastPinch = performance.now()
     const next = pinchGap()
-    if (pinchDist > 1) kickZoom((next - pinchDist) * sim.zoom * PINCH_ZOOM)
+    if (pinchDist > 1) kickZoom((next - pinchDist) * sim.zoom * PINCH_ZOOM, pinchGrow)
     pinchDist = next
     seeking = false
     return
@@ -1557,20 +1961,24 @@ canvas.addEventListener("pointerup", (event) => {
     pointers.clear()
     dragging = false
     pinching = false
+    pinchGrow = false
     return
   }
   pointers.delete(event.pointerId)
   if (pointers.size >= 2) {
+    pinchGrow = pointers.size >= 3
     pinchDist = pinchGap()
     return
   }
   if (pointers.size === 1) {
     pinching = false
+    pinchGrow = false
     pinchDist = 0
     dragging = false
     return
   }
   pinching = false
+  pinchGrow = false
   pinchDist = 0
   if (!dragging) {
     didPinch = false
@@ -1597,11 +2005,13 @@ canvas.addEventListener("pointercancel", (event) => {
   if (pointers.size === 0) {
     dragging = false
     pinching = false
+    pinchGrow = false
     didPinch = false
   }
 })
 
 canvas.addEventListener("touchstart", (event) => event.preventDefault(), { passive: false })
+canvas.addEventListener("touchmove", (event) => event.preventDefault(), { passive: false })
 
 const isOsMomentum = (event: WheelEvent, mag: number) => {
   const phase =
@@ -1645,7 +2055,7 @@ canvas.addEventListener(
       pendingPanAt = 0
       pendingPanDx = 0
       pendingPanDy = 0
-      kickZoom(-dy * sim.zoom * 28)
+      kickZoom(-dy * sim.zoom * 28, event.shiftKey)
       return
     }
 
@@ -1725,6 +2135,8 @@ renderer.setAnimationLoop(() => {
   }
 
   if (COUNT === 0) {
+    stepImagePalette(dt)
+    chrome.step(now, dt)
     present()
     return
   }
@@ -1762,5 +2174,7 @@ renderer.setAnimationLoop(() => {
     const photo = COUNT > 0 ? photos[imageIds[center]] : undefined
     setFocusedPath(photo?.path ?? focusedPath)
   }
+  stepImagePalette(dt)
+  chrome.step(now, dt)
   present()
 })

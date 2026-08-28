@@ -265,7 +265,11 @@ button:disabled {
   color: var(--secondary);
 }
 
-.tweaks[hidden] {
+.tweaks[hidden],
+.field[hidden],
+.hint[hidden],
+#addColor[hidden],
+#imagePaletteFields[hidden] {
   display: none;
 }
 
@@ -412,6 +416,13 @@ select {
 
 .swatch button:disabled {
   display: none;
+}
+
+.swatch-chip {
+  flex: 0 0 auto;
+  width: 3.2rem;
+  height: 32px;
+  border: 1px solid color-mix(in srgb, var(--secondary) 22%, transparent);
 }
 
 .panel-tabs button:hover {

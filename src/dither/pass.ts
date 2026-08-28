@@ -2,7 +2,7 @@ import * as THREE from "three"
 import { applyCircularVignette, applyDither, bayerSize, generateBayer } from "./dither.ts"
 import { blueNoiseMap } from "./blueNoise.ts"
 import { ColorImage, parseHexColor } from "./image.ts"
-import { MAX_PALETTE, bayerLevelFor, needsErrorDiffusion, paletteColors, type Settings } from "./settings.ts"
+import { MAX_PALETTE, bayerLevelFor, needsErrorDiffusion, paletteColors, themeColors, type Settings } from "./settings.ts"
 
 const MAX_SIZE = 1024
 
@@ -67,6 +67,52 @@ void main() {
 }
 `
 
+const focusFrag = `
+precision highp float;
+varying vec2 vUv;
+uniform sampler2D tMap;
+uniform sampler2D tThreshold;
+uniform vec2 uResolution;
+uniform float uCoarseness;
+uniform vec3 uPalette[${MAX_PALETTE}];
+uniform int uPaletteSize;
+uniform float uSpread;
+uniform float uThresholdSize;
+uniform float uQuantize;
+uniform float uDither;
+uniform float uOpacity;
+
+vec3 nearest(vec3 c) {
+  vec3 best = uPalette[0];
+  float bestD = 1.0e20;
+  for (int i = 0; i < ${MAX_PALETTE}; i++) {
+    if (i >= uPaletteSize) break;
+    vec3 d = c - uPalette[i];
+    float dist = dot(d, d);
+    if (dist < bestD) {
+      bestD = dist;
+      best = uPalette[i];
+    }
+  }
+  return best;
+}
+
+void main() {
+  vec4 tex = texture2D(tMap, vUv);
+  vec3 color = tex.rgb;
+  float coarse = max(uCoarseness, 1.0);
+  vec2 pixel = floor(gl_FragCoord.xy / coarse);
+  if (uDither > 0.5) {
+    vec2 tUV = (mod(pixel, uThresholdSize) + 0.5) / uThresholdSize;
+    float thresh = texture2D(tThreshold, tUV).r;
+    color += (thresh - 0.5) * uSpread;
+  }
+  if (uQuantize > 0.5) color = nearest(color);
+  else color = clamp(color, 0.0, 1.0);
+  gl_FragColor = vec4(color, tex.a * uOpacity);
+}
+`
+
 const floatMap = (data: Float32Array, size: number) => {
   const tex = new THREE.DataTexture(data, size, size, THREE.RedFormat, THREE.FloatType)
   tex.minFilter = THREE.NearestFilter
@@ -108,6 +154,28 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
     },
     vertexShader: vert,
     fragmentShader: frag,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false,
+  })
+
+  const focusMaterial = new THREE.ShaderMaterial({
+    uniforms: {
+      tMap: { value: null },
+      tThreshold: material.uniforms.tThreshold,
+      uResolution: material.uniforms.uResolution,
+      uCoarseness: material.uniforms.uCoarseness,
+      uPalette: material.uniforms.uPalette,
+      uPaletteSize: material.uniforms.uPaletteSize,
+      uSpread: material.uniforms.uSpread,
+      uThresholdSize: material.uniforms.uThresholdSize,
+      uQuantize: { value: 0 },
+      uDither: { value: 0 },
+      uOpacity: { value: 0 },
+    },
+    vertexShader: vert,
+    fragmentShader: focusFrag,
+    transparent: true,
     depthTest: false,
     depthWrite: false,
     toneMapped: false,
@@ -164,7 +232,7 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
       scratchColor.set(colors[Math.min(i, colors.length - 1)] ?? "#000000")
       palette[i]!.set(scratchColor.r, scratchColor.g, scratchColor.b)
     }
-    scratchColor.set(settings.primary)
+    scratchColor.set(themeColors(settings).primary)
     material.uniforms.uBackground.value.set(scratchColor.r, scratchColor.g, scratchColor.b)
     material.uniforms.uCoarseness.value = Math.max(1, settings.coarseness)
     material.uniforms.uVignetteRadius.value = settings.vignetteRadius
@@ -181,6 +249,17 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
     }
   }
 
+  const setPaletteRgb = (colors: [number, number, number][]) => {
+    const n = Math.max(0, Math.min(MAX_PALETTE, colors.length))
+    material.uniforms.uPaletteSize.value = n
+    material.uniforms.uSpread.value = n > 1 ? 1 / (n - 1) : 0.5
+    for (let i = 0; i < MAX_PALETTE; i++) {
+      const c = colors[Math.min(i, Math.max(0, n - 1))] ?? [0, 0, 0]
+      palette[i]!.set(c[0], c[1], c[2])
+    }
+    if (n > 0) material.uniforms.uBackground.value.set(colors[0]![0], colors[0]![1], colors[0]![2])
+  }
+
   const ditherCpu = (settings: Settings) => {
     renderer.readRenderTargetPixels(sceneTarget, 0, 0, width, height, pixels)
     const image = new ImageData(width, height)
@@ -189,7 +268,7 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
       const dst = y * width * 4
       image.data.set(pixels.subarray(src, src + width * 4), dst)
     }
-    const background = parseHexColor(settings.primary)
+    const background = parseHexColor(themeColors(settings).primary)
     const color = ColorImage.fromImageData(image, background)
     applyCircularVignette(
       color,
@@ -220,13 +299,26 @@ export const createDitherPass = (renderer: THREE.WebGLRenderer) => {
     renderer.render(blitScene, blitCam)
   }
 
+  const setFocusOverlay = (
+    map: THREE.Texture | null,
+    opacity: number,
+    originalColor: boolean,
+    undithered: boolean,
+  ) => {
+    focusMaterial.uniforms.tMap.value = map
+    focusMaterial.uniforms.uOpacity.value = opacity
+    focusMaterial.uniforms.uQuantize.value = originalColor ? 0 : 1
+    focusMaterial.uniforms.uDither.value = undithered ? 0 : 1
+  }
+
   const dispose = () => {
     sceneTarget.dispose()
     material.dispose()
+    focusMaterial.dispose()
     cpuMaterial.dispose()
     cpuTexture.dispose()
     quad.geometry.dispose()
   }
 
-  return { resize, setSettings, render, dispose }
+  return { resize, setSettings, setPaletteRgb, setFocusOverlay, focusMaterial, render, dispose }
 }

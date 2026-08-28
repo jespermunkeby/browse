@@ -59,18 +59,45 @@
               <span>Area <em id="areaVal">0.07</em></span>
               <input id="imageArea" type="range" min="0.02" max="0.36" step="0.01" />
             </label>
+            <label class="toggle">
+              <input id="focusOriginalColor" type="checkbox" />
+              <span>Focus original color</span>
+            </label>
+            <label class="toggle">
+              <input id="focusUndithered" type="checkbox" />
+              <span>Focus undithered</span>
+            </label>
           </section>
 
           <section>
             <h2>Palette</h2>
             <label class="field">
+              <span>Source</span>
+              <select id="paletteSource"></select>
+            </label>
+            <div id="imagePaletteFields" hidden>
+              <label class="field">
+                <span>Colors <em id="imageColorCountVal">5</em></span>
+                <input id="imageColorCount" type="range" min="2" max="24" step="1" />
+              </label>
+              <label class="field">
+                <span>Strategy</span>
+                <select id="paletteStrategy"></select>
+              </label>
+              <label class="field">
+                <span>Fade <em id="paletteFadeVal">0.45s</em></span>
+                <input id="paletteFade" type="range" min="0" max="3" step="0.05" />
+              </label>
+            </div>
+            <label class="field" id="primaryField">
               <span>Primary</span>
               <input id="primaryColor" type="color" />
             </label>
-            <label class="field">
+            <label class="field" id="secondaryField">
               <span>Secondary</span>
               <input id="secondaryColor" type="color" />
             </label>
+            <p class="hint" id="paletteHint" hidden>Focus an image to sample its palette</p>
             <div id="palette" class="palette"></div>
             <button type="button" id="addColor">Add color</button>
           </section>
