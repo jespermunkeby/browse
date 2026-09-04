@@ -19,8 +19,14 @@ const tmpAxis = new THREE.Vector3()
 const tmpQ = new THREE.Quaternion()
 const tmpTwist = new THREE.Quaternion()
 
+/**
+ * Slack before the innermost slot counts as gone. Zooming out by the amount you zoomed in lands a
+ * hair either side of the integer; without this the original centre could flicker out and back.
+ */
+export const ZOOM_EPS = 0.05
+
 export const slotRange = (growth: number) => {
-  const kMin = Math.ceil(-growth)
+  const kMin = Math.ceil(-growth - ZOOM_EPS)
   return { kMin, kMax: kMin + COUNT - 1 }
 }
 

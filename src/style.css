@@ -63,87 +63,225 @@ body {
   display: flex;
   flex-direction: column;
   pointer-events: none;
-  outline: 1px solid color-mix(in srgb, var(--secondary) 18%, transparent);
-  outline-offset: -1px;
 }
 
-.panel-head,
-.panel-tabs,
-.term-tree,
-.term-meta,
-.tweaks {
-  pointer-events: auto;
+.info,
+.tweaks,
+.seed,
+.status,
+.corner-toggle {
   text-shadow: 0 1px 2px color-mix(in srgb, var(--primary) 80%, transparent);
 }
 
-.panel-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.75rem;
-  padding: 0.7rem 0.85rem 0.45rem;
-  font-size: 11px;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--secondary);
-  flex: 0 0 auto;
-}
-
-.panel-tabs {
-  display: flex;
-  gap: 0.75rem;
-}
-
-.panel-tabs button {
-  border: 0;
-  padding: 0 0.2rem;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  font-size: 11px;
-  line-height: 22px;
-  color: var(--secondary);
-  opacity: 0.4;
-}
-
-.panel-tabs button.is-active {
-  opacity: 1;
-  background: var(--secondary);
-  color: var(--primary);
-}
-
-.term-tree,
-.term-meta {
-  flex: 0 1 auto;
-  max-height: 100%;
-  min-height: 0;
-  margin: 0;
-  padding: 0.15rem 0.85rem 0.9rem;
-  overflow: auto;
-}
-
-.term-tree,
-.term-meta,
+.info,
 .tweaks {
   touch-action: pan-y;
 }
 
-.term-tree {
-  font-variant-ligatures: none;
+/* ── Brand: the mark in the primary colour, knocked out of a secondary tile ── */
+
+.brand {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  padding: 1.5rem 1.5rem 0;
+  pointer-events: none;
 }
 
-.tree-hint,
-.term-meta {
+.logo {
+  --logo-size: 44px;
+  position: relative;
+  display: block;
+  width: var(--logo-size);
+  height: var(--logo-size);
+  background: var(--secondary);
+  pointer-events: auto;
+  transition: transform 0.12s;
+}
+
+.logo::after {
+  content: "";
+  position: absolute;
+  inset: 12%;
+  background: var(--primary);
+  -webkit-mask: url("/logo.svg") center / contain no-repeat;
+  mask: url("/logo.svg") center / contain no-repeat;
+}
+
+.logo:hover {
+  transform: translateY(-1px);
+}
+
+.logo:active {
+  transform: translateY(1px);
+}
+
+/* ── Info panels ───────────────────────────────────────────── */
+
+.info {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1.6rem;
+  /* Bottom padding clears the status line and settings toggle. */
+  padding: 1.6rem 1.5rem 3.4rem;
+  overflow: hidden;
   color: var(--secondary);
 }
 
-.term-meta {
+/* Under the brand tile the block panel needs less headroom. */
+.brand + .info {
+  padding-top: 1.2rem;
+}
+
+.info[hidden] {
+  display: none;
+}
+
+.info-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  min-height: 0;
+}
+
+.info-group > * {
+  pointer-events: auto;
+}
+
+.info-group.top {
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+.info-group.mid {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  justify-content: center;
+}
+
+.info-group.bottom {
+  flex: 0 0 auto;
+}
+
+.info-kicker {
+  margin: 0 0 0.25rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.info-title {
+  margin: 0;
+  font: inherit;
+  font-size: 11px;
+  line-height: 22px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.info-desc {
+  margin: 0.5rem 0 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+  display: -webkit-box;
+  -webkit-line-clamp: 9;
+  line-clamp: 9;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  opacity: 0.85;
+}
+
+.info-muted {
+  margin: 0;
+  opacity: 0.55;
+}
+
+.info-rows {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0 1.2rem;
+  margin: 0;
+}
+
+.info-rows dt {
+  opacity: 0.55;
+}
+
+.info-rows dd {
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: pre;
+  font-variant-numeric: tabular-nums;
+}
+
+.info-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 1.2rem;
+  margin-top: 0.6rem;
+}
+
+.info-link,
+.info-inline {
   font: inherit;
   color: var(--secondary);
+  background: none;
+  border: 0;
+  padding: 0;
+  text-decoration: none;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--secondary) 35%, transparent);
+  line-height: 20px;
 }
 
-.tree-row {
-  display: block;
+.info-link:hover,
+.info-inline:hover {
+  border-bottom-color: var(--secondary);
+}
+
+.info-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.info-context {
+  margin: 0;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Divider under the context title; scaled down from the left as the hold runs out. */
+.info-timer {
+  height: 1px;
+  margin-top: 0.55rem;
+  background: var(--secondary);
+  opacity: 0.55;
+  transform-origin: left center;
+  transform: scaleX(1);
+  will-change: transform;
+}
+
+.info-channel {
+  display: grid;
+  grid-template-columns: 1ch minmax(0, 1fr) auto;
+  gap: 0 0.7rem;
   width: 100%;
   margin: 0;
   padding: 0;
@@ -152,41 +290,256 @@ body {
   font: inherit;
   color: var(--secondary);
   text-align: left;
-  white-space: pre;
-  line-height: 1.4;
   cursor: pointer;
+  line-height: 22px;
 }
 
-.tree-row:hover,
-.tree-row:hover .tree-guide {
-  color: var(--secondary);
+.info-channel-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.tree-row.is-dir {
-  cursor: default;
-  color: var(--secondary);
+.info-channel-meta {
+  opacity: 0.55;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
-.tree-row.is-dir:hover,
-.tree-row.is-dir:hover .tree-guide {
-  color: var(--secondary);
+.info-channel-mark {
+  white-space: pre;
 }
 
-.tree-guide {
-  color: var(--secondary);
-  user-select: none;
-}
-
-.tree-row.is-focus .tree-name {
+.info-channel:hover .info-channel-title,
+.info-channel.is-active .info-channel-title {
   background: var(--secondary);
   color: var(--primary);
 }
 
-@media (max-width: 720px) {
-  #layout {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) min(100vw, 100dvh) minmax(0, 1fr);
+.info-channel:hover .info-channel-meta,
+.info-channel.is-active .info-channel-meta {
+  opacity: 1;
+}
+
+.info-channel.is-done {
+  opacity: 0.4;
+}
+
+.info-channel.is-done .info-channel-title {
+  text-decoration: line-through;
+}
+
+/* ── Palette swatches: 2×2 block glyphs, click to copy ─────── */
+
+.info-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 0.55rem;
+  margin: 0.55rem 0 0.1rem;
+  line-height: 11px;
+}
+
+.info-swatches[hidden] {
+  display: none;
+}
+
+.info-swatch {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  line-height: 11px;
+  white-space: pre;
+  cursor: pointer;
+  text-shadow: none;
+  transition: transform 0.12s;
+}
+
+.info-swatch:hover {
+  transform: translateY(-1px);
+}
+
+.info-swatch:active {
+  transform: translateY(1px);
+}
+
+/* ── Instructions ──────────────────────────────────────────── */
+
+.hint-lines {
+  display: flex;
+  flex-direction: column;
+}
+
+.hint-line {
+  display: grid;
+  grid-template-columns: 5ch 1ch auto;
+  gap: 0 0.8rem;
+  margin: 0;
+  color: var(--secondary);
+}
+
+.hint-action {
+  text-align: right;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.hint-arrow,
+.hint-effect {
+  opacity: 0.7;
+}
+
+.seed .hint-lines {
+  margin-top: 1.2rem;
+}
+
+.first-hint {
+  position: absolute;
+  left: 50%;
+  bottom: 3.2rem;
+  transform: translateX(-50%);
+  pointer-events: none;
+  z-index: 1;
+  text-shadow: 0 1px 2px color-mix(in srgb, var(--primary) 80%, transparent);
+  transition: opacity 0.9s;
+}
+
+.first-hint[hidden] {
+  display: none;
+}
+
+.first-hint.is-fading {
+  opacity: 0;
+}
+
+/* ── Seed form (empty state) ───────────────────────────────── */
+
+.seed {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.6rem;
+  padding: 1.5rem;
+  pointer-events: auto;
+  z-index: 1;
+}
+
+.seed[hidden] {
+  display: none;
+}
+
+.seed-label {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--secondary);
+}
+
+.seed input {
+  width: min(100%, 26rem);
+  font: inherit;
+  color: var(--secondary);
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--secondary) 35%, transparent);
+  padding: 0.5rem 0.7rem;
+  text-align: center;
+  outline: none;
+}
+
+.seed input:focus {
+  border-color: var(--secondary);
+}
+
+.seed input::placeholder {
+  color: var(--secondary);
+  opacity: 0.4;
+}
+
+.seed-hint {
+  margin: 0;
+  color: var(--secondary);
+  opacity: 0.55;
+  min-height: 22px;
+  text-align: center;
+}
+
+.seed-hint.is-error {
+  opacity: 1;
+}
+
+/* ── Status + settings toggle ──────────────────────────────── */
+
+.status,
+.corner-toggle {
+  position: absolute;
+  bottom: 0.9rem;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: var(--secondary);
+  font: inherit;
+  letter-spacing: 0.06em;
+  pointer-events: auto;
+  user-select: none;
+}
+
+.status {
+  left: 1.5rem;
+  opacity: 0.6;
+  transition: opacity 0.3s;
+}
+
+.status[data-state="fetching"],
+.status[data-state="limited"],
+.status[data-state="offline"] {
+  opacity: 1;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 99px;
+  background: var(--secondary);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 60%, transparent);
+}
+
+.status[data-state="fetching"] .status-dot {
+  animation: status-blink 0.7s steps(2, end) infinite;
+}
+
+.status[data-state="limited"] .status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--secondary);
+}
+
+.status[data-state="offline"] .status-dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--secondary);
+  animation: status-blink 1.4s steps(2, end) infinite;
+}
+
+@keyframes status-blink {
+  50% {
+    opacity: 0.25;
   }
+}
+
+.corner-toggle {
+  right: 1.5rem;
+  border: 0;
+  background: none;
+  padding: 0;
+  opacity: 0.45;
+  cursor: pointer;
+}
+
+.corner-toggle:hover,
+.corner-toggle[aria-pressed="true"] {
+  opacity: 1;
 }
 
 #viewPanel {
@@ -222,7 +575,8 @@ body {
 
 .file,
 button,
-select {
+select,
+.tweaks input[type="text"] {
   font: inherit;
   color: var(--secondary);
   background: transparent;
@@ -231,14 +585,26 @@ select {
   cursor: pointer;
 }
 
-.panel-head .file {
-  letter-spacing: 0;
-  text-transform: none;
-  font-size: 11px;
-  padding: 0.25rem 0.5rem;
+.file {
+  flex: 1;
+  text-align: center;
 }
 
-.icon-btn:hover,
+.tweaks input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  cursor: text;
+  outline: none;
+}
+
+.tweaks input[type="text"]:focus {
+  border-color: var(--secondary);
+}
+
+#sourceForm button {
+  flex: 0 0 auto;
+}
+
 .file:hover,
 button:hover,
 select:hover {
@@ -257,6 +623,7 @@ button:disabled {
 .tweaks {
   flex: 1 1 auto;
   min-height: 0;
+  pointer-events: auto;
   overflow: auto;
   width: auto;
   max-height: none;
@@ -425,11 +792,6 @@ select {
   border: 1px solid color-mix(in srgb, var(--secondary) 22%, transparent);
 }
 
-.panel-tabs button:hover {
-  border-color: transparent;
-  opacity: 1;
-}
-
 #addColor {
   width: 100%;
 }
@@ -448,4 +810,240 @@ body.drag::after {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   font-size: 11px;
+}
+
+/* ── Phone: block info above, sphere in the middle, sources below ── */
+
+@media (max-width: 720px) {
+  :root {
+    --edge: 1rem;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  /* Panels take only what they need; the sphere (sized by the viewport width) centres in the rest. */
+  #layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .info {
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    padding: calc(0.7rem + var(--safe-top)) var(--edge) 0.6rem;
+  }
+
+  .info-group.top {
+    flex: 0 0 auto;
+  }
+
+  /* Fixed panel heights keep the sphere from re-scaling every time the focus changes. */
+  #leftPanel .info {
+    height: calc(168px + var(--safe-top));
+  }
+
+  /* The tile sits in the corner on the title's first line instead of taking a row of its own. */
+  #leftPanel {
+    position: relative;
+  }
+
+  .brand {
+    position: absolute;
+    /* Centred on the title's 22px first line. */
+    top: calc(0.7rem + var(--safe-top) - 2px);
+    left: var(--edge);
+    padding: 0;
+    z-index: 1;
+  }
+
+  .logo {
+    --logo-size: 26px;
+  }
+
+  .brand + .info {
+    padding-top: calc(0.7rem + var(--safe-top));
+  }
+
+  #blockInfo .info-title,
+  #blockInfo .info-muted {
+    text-indent: calc(26px + 0.8rem);
+  }
+
+  .logo:hover {
+    transform: none;
+  }
+
+  #rightPanel .info {
+    height: calc(254px + var(--safe-bottom));
+  }
+
+  .info-long {
+    display: none;
+  }
+
+  /* The "block" kicker is obvious on a phone; the title carries the panel. */
+  #blockInfo .info-kicker {
+    display: none;
+  }
+
+  .info-title {
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .info-desc {
+    display: none;
+  }
+
+  /* Two label/value pairs per line. */
+  #blockInfo .info-rows {
+    grid-template-columns: max-content minmax(0, 1fr) max-content minmax(0, 1fr);
+    gap: 0 0.9rem;
+  }
+
+  /* Swatches and links flow on one line under the rows. */
+  #blockInfo .info-group.bottom {
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0 1.1rem;
+  }
+
+  #blockInfo .info-rows {
+    flex: 1 0 100%;
+  }
+
+  #blockInfo .info-links {
+    display: contents;
+  }
+
+  .info-swatches {
+    margin: 0;
+    flex-wrap: nowrap;
+  }
+
+  /* Sources sit above the status line; a few rows visible, the rest scrolls. */
+  #rightPanel .info {
+    padding-bottom: calc(2.9rem + var(--safe-bottom));
+  }
+
+  .info-group.mid {
+    flex: 0 1 auto;
+    justify-content: flex-start;
+  }
+
+  .info-list {
+    max-height: calc(4 * 30px);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    scrollbar-width: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .info-list::-webkit-scrollbar {
+    display: none;
+  }
+
+  #contextInfo .info-group.bottom {
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+  }
+
+  #contextInfo .info-group.bottom .info-links {
+    flex: 0 0 auto;
+  }
+
+  /* Finger-sized targets. */
+  .info-channel {
+    padding: 4px 0;
+  }
+
+  .info-link,
+  .info-inline {
+    padding: 4px 0;
+  }
+
+  .info-swatch {
+    padding: 6px 5px;
+  }
+
+  .info-channel:hover .info-channel-title {
+    background: none;
+    color: inherit;
+  }
+
+  .info-channel.is-active .info-channel-title {
+    background: var(--secondary);
+    color: var(--primary);
+  }
+
+  .first-hint {
+    bottom: 0.6rem;
+  }
+
+  .status,
+  .corner-toggle {
+    bottom: calc(0.8rem + var(--safe-bottom));
+    z-index: 5;
+    padding: 6px 0;
+  }
+
+  .status {
+    left: var(--edge);
+  }
+
+  .corner-toggle {
+    right: var(--edge);
+    padding: 6px 0 6px 1rem;
+  }
+
+  /* Settings become a full-screen sheet. */
+  .tweaks {
+    position: fixed;
+    inset: 0;
+    z-index: 4;
+    padding: calc(0.7rem + var(--safe-top)) var(--edge) calc(3.2rem + var(--safe-bottom));
+    /* No backdrop-filter here: it would turn the sheet into the containing block for the fixed strip below. */
+    background: var(--primary);
+  }
+
+  /* Solid strip behind the status line and close button while the sheet scrolls beneath. */
+  .tweaks::after {
+    content: "";
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: calc(3rem + var(--safe-bottom));
+    background: linear-gradient(to bottom, transparent, var(--primary) 45%);
+    pointer-events: none;
+  }
+
+  .tweaks-head,
+  .tweaks section {
+    padding-left: 0;
+    padding-right: 0;
+  }
+
+  /* Empty state: the paste form is the whole screen. */
+  body.is-empty .info {
+    display: none;
+  }
+
+  .seed input {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 720px) and (max-height: 700px) {
+  #rightPanel .info {
+    height: calc(224px + var(--safe-bottom));
+  }
+
+  .info-list {
+    max-height: calc(3 * 30px);
+  }
 }

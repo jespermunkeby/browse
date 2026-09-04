@@ -12,7 +12,7 @@ type Glyph = { node: Text; original: string }
 
 const collect = (root: HTMLElement, out: Glyph[]) => {
   const walk = (n: Node) => {
-    if (n instanceof HTMLElement && SKIP.has(n.tagName)) return
+    if (n instanceof HTMLElement && (SKIP.has(n.tagName) || n.dataset.scramble === "off")) return
     if (n.nodeType === Node.TEXT_NODE) {
       const original = n.nodeValue ?? ""
       if (!original) return

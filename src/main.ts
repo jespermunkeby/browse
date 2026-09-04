@@ -34,19 +34,33 @@ import {
 } from "./dither/settings.ts"
 import { createDitherPass } from "./dither/pass.ts"
 import { extractPalette, hexToRgb, mixPalette, remapPalette, rgbToHex, type RGB } from "./dither/extract.ts"
-import { disposePhoto, isImageFile, isImagePath, photoFromFile, photoSize, type Photo } from "./photos.ts"
-import {
-  filesFromDataTransfer,
-  filesFromList,
-  findFile,
-  renderTree,
-  treeFromFiles,
-  type FolderFile,
-  type TreeNode,
-} from "./folder.ts"
-import { renderMeta, type MetaSource } from "./meta.ts"
-import { fetchDemoFile, loadDemoIndex } from "./defaultFolder.ts"
+import { disposePhoto, isImageFile, photoFromArena, photoFromFile, photoSize, type Photo } from "./photos.ts"
+import { filesFromDataTransfer, filesFromList, type FolderFile } from "./folder.ts"
 import { createScramble } from "./scramble.ts"
+import {
+  ArenaError,
+  createArenaClient,
+  isImageBlock,
+  parseArenaTarget,
+  targetFromHash,
+  targetToHash,
+  type ArenaBlock,
+  type ArenaChannel,
+  type ArenaStatus,
+  type ArenaTarget,
+  type Priority,
+} from "./arena.ts"
+import {
+  MAX_SOURCE_ROWS,
+  paintSourceTimer,
+  paintSwatches,
+  renderBlockInfo,
+  renderInstructions,
+  renderSources,
+  updateSourceRows,
+  type FocusInfo,
+  type SourceState,
+} from "./info.ts"
 
 const sim = {
   spring: 0.2,
@@ -97,12 +111,23 @@ const canvas = document.querySelector<HTMLCanvasElement>("#canvas")!
 const tweaks = document.querySelector<HTMLElement>("#tweaks")!
 const motion = document.querySelector<HTMLElement>("#motion")!
 const viewPanel = document.querySelector<HTMLElement>("#viewPanel")!
-const treeEl = document.querySelector<HTMLElement>("#tree")!
-const metaEl = document.querySelector<HTMLElement>("#meta")!
-const dataTab = document.querySelector<HTMLButtonElement>("#dataTab")!
-const settingsTab = document.querySelector<HTMLButtonElement>("#settingsTab")!
+const blockInfoEl = document.querySelector<HTMLElement>("#blockInfo")!
+const contextInfoEl = document.querySelector<HTMLElement>("#contextInfo")!
+const settingsToggle = document.querySelector<HTMLButtonElement>("#settingsToggle")!
+const seedForm = document.querySelector<HTMLFormElement>("#seed")!
+const seedInput = document.querySelector<HTMLInputElement>("#seedInput")!
+const seedHint = document.querySelector<HTMLElement>("#seedHint")!
+const sourceForm = document.querySelector<HTMLFormElement>("#sourceForm")!
+const sourceInput = document.querySelector<HTMLInputElement>("#sourceInput")!
+const contextHoldInput = document.querySelector<HTMLInputElement>("#contextHold")!
+const contextHoldVal = document.querySelector<HTMLElement>("#contextHoldVal")!
+const timerRevealInput = document.querySelector<HTMLInputElement>("#timerReveal")!
+const timerRevealVal = document.querySelector<HTMLElement>("#timerRevealVal")!
+const hintEl = document.querySelector<HTMLElement>("#hint")!
+const seedInstructions = document.querySelector<HTMLElement>("#seedInstructions")!
+const statusEl = document.querySelector<HTMLElement>("#arenaStatus")!
+const statusText = document.querySelector<HTMLElement>("#arenaStatusText")!
 const fileInput = document.querySelector<HTMLInputElement>("#file")!
-const addMore = document.querySelector<HTMLButtonElement>("#addMore")!
 const clearImages = document.querySelector<HTMLButtonElement>("#clearImages")!
 const imageCount = document.querySelector<HTMLElement>("#imageCount")!
 const paletteEl = document.querySelector<HTMLElement>("#palette")!
@@ -155,12 +180,12 @@ const settings: Settings = {
   colors: [...DEFAULT_SETTINGS.colors],
   imageColors: [...DEFAULT_SETTINGS.imageColors],
 }
-const photos: Photo[] = []
+/** Sparse pool: evicted slots become undefined so marker indices stay stable. */
+const photos: (Photo | undefined)[] = []
 const photoByPath = new Map<string, number>()
 const imagePaletteCache = new Map<string, string[]>()
-let folderTree: TreeNode | null = null
+let poolCount = 0
 let focusedPath: string | null = null
-let focusedNode: TreeNode | null = null
 let lastPaletteKey = ""
 let paletteLive: RGB[] = []
 let paletteTarget: RGB[] = []
@@ -172,22 +197,21 @@ let projection: ProjectionId = "stereo"
 
 const formatTweak = (value: number, step: number) => value.toFixed(step < 0.01 ? 3 : step < 0.1 ? 2 : 1)
 
-const extraJson = () => ({ projection, spiral: showSpiral, motion: { ...sim } })
+const extraJson = () => ({ projection, spiral: showSpiral, motion: { ...sim }, arena: { ...arenaPrefs } })
 
 const motionControls = new Map<keyof typeof sim, { input: HTMLInputElement; value: HTMLElement }>()
 
-const setPane = (pane: "data" | "settings") => {
-  const settingsOpen = pane === "settings"
-  tweaks.hidden = !settingsOpen
-  metaEl.hidden = settingsOpen
-  dataTab.classList.toggle("is-active", !settingsOpen)
-  settingsTab.classList.toggle("is-active", settingsOpen)
-  dataTab.setAttribute("aria-selected", String(!settingsOpen))
-  settingsTab.setAttribute("aria-selected", String(settingsOpen))
+let settingsOpen = false
+
+const setSettingsOpen = (open: boolean) => {
+  settingsOpen = open
+  tweaks.hidden = !open
+  contextInfoEl.hidden = open
+  settingsToggle.textContent = open ? "close" : "settings"
+  settingsToggle.setAttribute("aria-pressed", String(open))
 }
 
-dataTab.addEventListener("click", () => setPane("data"))
-settingsTab.addEventListener("click", () => setPane("settings"))
+settingsToggle.addEventListener("click", () => setSettingsOpen(!settingsOpen))
 
 for (const option of projections) {
   const el = document.createElement("option")
@@ -356,6 +380,7 @@ const slotK = new Int32Array(MAX_COUNT)
 const imageIds = new Int32Array(MAX_COUNT)
 const behind: number[] = []
 const ahead: number[] = []
+const unzoomed: number[] = []
 const occupied = new Uint8Array(MAX_COUNT + 2)
 const entering = new Int32Array(MAX_COUNT)
 const focusMul = new Float32Array(MAX_COUNT).fill(1)
@@ -460,70 +485,179 @@ const stepFocusScale = (dt: number) => {
   }
 }
 
-const fileMeta = (node: TreeNode): MetaSource | null => {
-  if (node.kind !== "file" || !node.file) return null
-  const photoIndex = photoByPath.get(node.path)
-  const photo = photoIndex === undefined ? undefined : photos[photoIndex]
-  return {
-    name: node.name,
-    path: node.path,
-    kind: photo ? "image" : "file",
-    type: node.file.type,
-    bytes: node.file.size,
-    modified: node.file.lastModified,
-    width: photo?.width,
-    height: photo?.height,
-  }
+const chrome = createScramble([blockInfoEl, contextInfoEl])
+
+// ── Are.na state ─────────────────────────────────────────────────────────
+const arena = createArenaClient()
+const connectionsByBlock = new Map<number, ArenaChannel[]>()
+const connectionsPending = new Set<number>()
+const connectionsFailed = new Map<number, "waiting" | "unavailable">()
+const channelPages = new Map<string, { fetched: Set<number>; totalPages: number | null }>()
+let currentTarget: ArenaTarget | null = null
+
+/**
+ * The context is the block whose connected channels feed "more of the same".
+ * It lags behind the focus: it only follows once the user has been still for `arenaPrefs.holdMs`.
+ */
+type Context = {
+  id: number
+  title: string
+  channels: ArenaChannel[] | null
+  /** User-chosen source channel; null means "the first one that still has pages". */
+  selected: string | null
+  setAt: number
 }
-
-const photoMeta = (photo: Photo): MetaSource => ({
-  name: photo.name,
-  path: photo.path,
-  kind: "image",
-  type: photo.type,
-  bytes: photo.bytes,
-  modified: photo.modified,
-  width: photo.width,
-  height: photo.height,
-})
-
-const chrome = createScramble([metaEl])
-
-const syncTree = () => renderTree(folderTree, treeEl, focusedPath, (node) => setFocusFromTree(node))
-
-const syncMeta = () => {
-  if (focusedNode) {
-    renderMeta(metaEl, fileMeta(focusedNode))
-  } else if (focusedPath) {
-    const photoIndex = photoByPath.get(focusedPath)
-    const photo = photoIndex === undefined ? undefined : photos[photoIndex]
-    renderMeta(metaEl, photo ? photoMeta(photo) : null)
-  } else {
-    renderMeta(metaEl, null)
-  }
-  chrome.invalidate()
-}
-
-const cssRgb = (c: RGB) => `rgb(${c[0] * 255} ${c[1] * 255} ${c[2] * 255})`
-
-const setFocusedPath = (path: string | null) => {
-  const nextNode = path ? findFile(folderTree, path) : null
-  if (path === focusedPath && nextNode === focusedNode) return
-  focusedPath = path
-  focusedNode = nextNode
-  const rebuilt = applyImagePalette()
-  if (rebuilt) {
-    syncPalette()
-    syncDither()
-  }
-  syncTree()
-  syncMeta()
-}
+let context: Context | null = null
+/** `reveal`: fraction of the hold during which the timer line is seen running out (the last part). */
+const arenaPrefs = { holdMs: 2500, reveal: 0.5 }
 
 const photoAtPath = (path: string | null) => {
   if (!path) return undefined
   const index = photoByPath.get(path)
   return index === undefined ? undefined : photos[index]
+}
+
+const focusInfo = (): FocusInfo => {
+  const photo = photoAtPath(focusedPath)
+  if (!photo) return { kind: "none" }
+  if (photo.arena) return { kind: "arena", block: photo.arena, via: photo.via ?? null }
+  return {
+    kind: "local",
+    meta: {
+      name: photo.name,
+      path: photo.path,
+      type: photo.type,
+      bytes: photo.bytes,
+      modified: photo.modified,
+      width: photo.width,
+      height: photo.height,
+    },
+  }
+}
+
+const sourceState = (id: number): SourceState => {
+  if (connectionsByBlock.has(id)) return "ready"
+  if (connectionsPending.has(id)) return "pending"
+  return connectionsFailed.get(id) ?? "pending"
+}
+
+/** Hex palette currently driving the dither, for the swatches. */
+const paletteHex = () =>
+  settings.paletteSource === "image"
+    ? paletteLive.map(rgbToHex)
+    : [settings.primary, settings.secondary, ...settings.colors]
+
+const copyText = (text: string) => navigator.clipboard.writeText(text).catch(() => undefined)
+
+const copyColor = (hex: string) => {
+  void copyText(hex)
+  flashStatus(`copied ${hex}`, 1600)
+}
+
+const downloadBlock = async (block: ArenaBlock, button: HTMLButtonElement) => {
+  const image = block.image
+  if (!image) return
+  const label = button.textContent
+  button.textContent = "downloading…"
+  button.disabled = true
+  try {
+    const res = await fetch(image.src)
+    if (!res.ok) throw new Error(String(res.status))
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement("a")
+    a.href = url
+    a.download = image.filename || `arena-${block.id}`
+    a.click()
+    window.setTimeout(() => URL.revokeObjectURL(url), 10_000)
+  } catch {
+    window.open(image.src, "_blank", "noopener")
+  } finally {
+    button.textContent = label
+    button.disabled = false
+  }
+}
+
+const syncSwatches = () => paintSwatches(blockInfoEl, paletteHex(), copyColor)
+
+const syncInfo = () => {
+  const info = focusInfo()
+  renderBlockInfo(blockInfoEl, info, {
+    palette: paletteHex(),
+    onCopyColor: copyColor,
+    onDownload: (block, button) => void downloadBlock(block, button),
+  })
+  renderSources(contextInfoEl, {
+    title: context ? context.title : null,
+    state: context ? (context.id >= 0 ? sourceState(context.id) : "ready") : "unavailable",
+    poolSize: poolCount,
+    onSelect: (channel) => void selectChannel(channel),
+    onCopyLink: () => void copyText(location.href),
+    ...sourceRowsView(),
+  })
+  chrome.invalidate()
+}
+
+/** Per-channel local counts: how many of its photos we hold, and how many of those are not on a marker yet. */
+type ChannelStats = { cached: number; unseen: number }
+const channelStats = new Map<string, ChannelStats>()
+const NO_STATS: ChannelStats = { cached: 0, unseen: 0 }
+
+const recountChannels = () => {
+  channelStats.clear()
+  const shown = new Set<number>()
+  for (let i = 0; i < COUNT; i++) shown.add(imageIds[i])
+  for (let i = 0; i < photos.length; i++) {
+    const slug = photos[i]?.via?.slug
+    if (!slug) continue
+    let s = channelStats.get(slug)
+    if (!s) channelStats.set(slug, (s = { cached: 0, unseen: 0 }))
+    s.cached++
+    if (!shown.has(i)) s.unseen++
+  }
+}
+
+const sourceRowsView = () => {
+  recountChannels()
+  return {
+    channels: context?.channels ?? null,
+    activeSlug: activeChannel()?.slug ?? null,
+    metaText: (channel: ArenaChannel) => {
+      const s = channelStats.get(channel.slug) ?? NO_STATS
+      const { entry } = pagesFor(channel)
+      const local = s.cached || entry.fetched.size ? `${s.unseen}/${s.cached}` : String(channel.counts.blocks)
+      return `${channel.owner.name} · ${local}`
+    },
+    metaTitle: (channel: ArenaChannel) => {
+      const s = channelStats.get(channel.slug) ?? NO_STATS
+      const { entry } = pagesFor(channel)
+      const total = entry.totalPages ?? Math.max(1, Math.ceil(channel.counts.contents / PAGE_SIZE))
+      return `${s.unseen} unseen of ${s.cached} cached · pages ${entry.fetched.size}/${total}`
+    },
+    done: (channel: ArenaChannel) => exhausted(channel) && (channelStats.get(channel.slug)?.unseen ?? 0) === 0,
+  }
+}
+
+/** Keeps the source rows' counts and active marker in step with the zoom without re-rendering the list. */
+let lastRowSyncAt = 0
+const ROW_SYNC_MS = 120
+const syncSourceRows = (now: number) => {
+  if (now - lastRowSyncAt < ROW_SYNC_MS || !context?.channels) return
+  lastRowSyncAt = now
+  updateSourceRows(contextInfoEl, sourceRowsView())
+}
+
+const cssRgb = (c: RGB) => `rgb(${c[0] * 255} ${c[1] * 255} ${c[2] * 255})`
+
+const setFocusedPath = (path: string | null) => {
+  if (path === focusedPath) return
+  focusedPath = path
+  const rebuilt = applyImagePalette()
+  if (rebuilt) {
+    syncPalette()
+    syncDither()
+  }
+  syncInfo()
 }
 
 const customPaletteRgb = (): RGB[] =>
@@ -536,6 +670,7 @@ const commitLivePalette = (rebuild: boolean) => {
   applyTheme()
   if (rebuild) ditherPass.setSettings(settings)
   if (paletteLive.length) ditherPass.setPaletteRgb(paletteLive)
+  syncSwatches()
 }
 
 const paintImageSwatches = () => {
@@ -628,17 +763,6 @@ const focusPhoto = (photoIndex: number) => {
   }
   if (index >= 0) setSeek(index)
   setFocusedPath(photos[photoIndex]?.path ?? null)
-}
-
-const setFocusFromTree = (node: TreeNode) => {
-  if (node.kind !== "file") return
-  const photoIndex = photoByPath.get(node.path)
-  if (photoIndex !== undefined) {
-    if (inspectOpen) closeInspect()
-    focusPhoto(photoIndex)
-    return
-  }
-  setFocusedPath(node.path)
 }
 
 const closeInspect = () => {
@@ -745,7 +869,30 @@ const inspectSettled = () =>
   inspectPosVel.lengthSq() < 1e-5 &&
   inspectScaleVel.lengthSq() < 1e-5
 
-const projectThumbs = (dt: number) => {
+/** How long a marker must sit on the back hemisphere before its image is swapped for an unseen one. */
+const SWAP_HIDDEN_MS = 350
+const hiddenSince = new Float64Array(MAX_COUNT)
+
+/** Pan = explore: a marker that has drifted out of view quietly picks up a random cached image. */
+const maybeSwapHidden = (i: number, now: number) => {
+  if (i === center || zooming(now) || ahead.length === 0) return
+  if (hiddenSince[i] === 0) {
+    hiddenSince[i] = now
+    return
+  }
+  if (!Number.isFinite(hiddenSince[i]!) || now - hiddenSince[i]! < SWAP_HIDDEN_MS) return
+  const pick = Math.floor(Math.random() * ahead.length)
+  const next = ahead[pick]!
+  if (!photos[next]) {
+    ahead.splice(pick, 1)
+    return
+  }
+  imageIds[i] = next
+  hiddenSince[i] = Number.POSITIVE_INFINITY
+  restockQueues()
+}
+
+const projectThumbs = (dt: number, now: number) => {
   stepFocusScale(dt)
   let inspectShown = false
   let overlayPhoto: Photo | undefined
@@ -769,9 +916,12 @@ const projectThumbs = (dt: number) => {
         inspectPhoto = -1
         inspectSeeded = false
       }
+      if (!inspecting) maybeSwapHidden(i, now)
       mesh.visible = false
       continue
     }
+    hiddenSince[i] = 0
+    photo.shownAt = now
     const { w, h } = thumbSize(photo)
     const mul = focusMul[i]!
     let x = front ? pickWorld.x : inspectPos.x
@@ -849,14 +999,55 @@ const polePoint = () => {
   return best
 }
 
+/**
+ * Queues:
+ *  - `ahead`: unseen pool, sorted so the most recently related photos pop first (zoom = more of the same);
+ *  - `behind`: photos that slid out the back while zooming in (come back when zooming out);
+ *  - `unzoomed`: photos that vanished from the centre while zooming out (come back when zooming in).
+ * The two session stacks make zoom reversible until the session ends (pan or context switch).
+ */
+const pruneStack = (stack: number[], used: Set<number>) => {
+  let w = 0
+  for (const i of stack) if (photos[i] && !used.has(i)) stack[w++] = i
+  stack.length = w
+}
+
 const restockQueues = () => {
-  behind.length = 0
   ahead.length = 0
   const used = new Set<number>()
   for (let i = 0; i < COUNT; i++) used.add(imageIds[i])
-  for (let i = photos.length - 1; i >= 0; i--) if (!used.has(i)) ahead.push(i)
+  pruneStack(behind, used)
+  pruneStack(unzoomed, used)
+  for (const i of behind) used.add(i)
+  for (const i of unzoomed) used.add(i)
+  for (let i = 0; i < photos.length; i++) if (photos[i] && !used.has(i)) ahead.push(i)
+  ahead.sort((a, b) => photos[a]!.related - photos[b]!.related)
 }
 
+const zoomSessionActive = () => behind.length > 0 || unzoomed.length > 0
+
+const endZoomSession = () => {
+  if (!zoomSessionActive()) return
+  behind.length = 0
+  unzoomed.length = 0
+  restockQueues()
+}
+
+/** Next photo when a slot opens at the centre (zooming in): first what we just zoomed away from. */
+const takeForward = () => {
+  if (unzoomed.length) return unzoomed.pop()!
+  if (ahead.length) return ahead.pop()!
+  return 0
+}
+
+/** Next photo when a slot opens at the back (zooming out): first what slid out earlier. */
+const takeBackward = () => {
+  if (behind.length) return behind.pop()!
+  if (ahead.length) return ahead.shift()!
+  return 0
+}
+
+/** Re-anchors the zoom window on the new centre; the zoom session (behind/unzoomed) survives a re-focus. */
 const resetZoomWindow = () => {
   growth = 0
   zoomVel = 0
@@ -962,12 +1153,6 @@ const setSeek = (index: number) => {
 const pinchLive = (now = performance.now()) => now - lastPinch < ZOOM_LOCK_MS
 const zooming = (now = performance.now()) => Math.abs(zoomVel) > sim.zoomHandoff || pinchLive(now)
 
-const takeId = (stack: number[], other: number[]) => {
-  if (stack.length) return stack.pop()!
-  if (other.length) return other.shift()!
-  return 0
-}
-
 const captureLattice = () => {
   writeSlotTargets(slotK, growth, poleDir, twist, prevLattice)
 }
@@ -1003,7 +1188,7 @@ const copyTriple = (src: Float32Array, from: number, dst: Float32Array, to: numb
   dst[b + 2] = src[a + 2]!
 }
 
-const liveCap = () => Math.min(MAX_COUNT, photos.length)
+const liveCap = () => Math.min(MAX_COUNT, poolCount)
 
 const syncSphereCount = () => {
   if (COUNT < MIN_COUNT) return
@@ -1073,10 +1258,10 @@ const remapWindow = (kMin: number, kMax: number) => {
     const next = entering[--enteringN]!
     if (slotK[i]! > kMax) {
       behind.push(imageIds[i]!)
-      imageIds[i] = takeId(ahead, behind)
+      imageIds[i] = takeForward()
     } else {
-      ahead.push(imageIds[i]!)
-      imageIds[i] = takeId(behind, ahead)
+      unzoomed.push(imageIds[i]!)
+      imageIds[i] = takeBackward()
     }
     slotK[i] = next
     remapped[i] = 1
@@ -1092,7 +1277,7 @@ const growWindow = (kMin: number, kMax: number) => {
       continue
     }
     if (k > kMax) behind.push(imageIds[i]!)
-    else ahead.push(imageIds[i]!)
+    else unzoomed.push(imageIds[i]!)
     dropPoint(i)
   }
   const span = kMax - kMin + 1
@@ -1100,13 +1285,13 @@ const growWindow = (kMin: number, kMax: number) => {
   for (let j = 0; j < COUNT; j++) occupied[slotK[j]! - kMin] = 1
   for (let k = kMin; k <= kMax; k++) {
     if (occupied[k - kMin] || COUNT >= liveCap()) continue
-    addPoint(k, takeId(ahead, behind))
+    addPoint(k, takeForward())
   }
 }
 
 const syncSlotsToGrowth = () => {
   remapped.fill(0)
-  const kMin = Math.ceil(-growth)
+  const kMin = slotRange(growth).kMin
   const cap = liveCap()
   if (growZoom && COUNT > 0 && cap >= MIN_COUNT) {
     let heldMax = kMin - 1
@@ -1127,6 +1312,9 @@ const syncSlotsToGrowth = () => {
 
 const kickZoom = (impulse: number, grow = false) => {
   if (impulse === 0 || inspectOpen || COUNT === 0) return
+  noteInteraction()
+  panSincePx = 0
+  panned = false
   if (!zooming()) {
     captureLattice()
     focusCandidate = center
@@ -1167,8 +1355,19 @@ const stepZoom = (dt: number) => {
   return true
 }
 
+let panSincePx = 0
+/** Set by a real pan: the context follows the focus as soon as it settles, skipping the hold. */
+let panned = false
 const panByPixels = (dx: number, dy: number) => {
   if (dx === 0 && dy === 0) return
+  noteInteraction()
+  // A real pan (not click jitter) ends the zoom session at once: what slid away is no longer coming back.
+  panSincePx += Math.hypot(dx, dy)
+  if (panSincePx > 6) {
+    panSincePx = 0
+    panned = true
+    endZoomSession()
+  }
   rotQ.setFromAxisAngle(axisVec.set(0, 1, 0), -dx * PAN_ROTATE)
   content.quaternion.premultiply(rotQ)
   rotQ.setFromAxisAngle(axisVec.set(1, 0, 0), -dy * PAN_ROTATE)
@@ -1233,8 +1432,9 @@ const stepFocus = (now: number) => {
     return
   }
 
+  // While seeking a chosen centre (click, zoom handoff), never retarget to whatever drifts past the middle.
+  if (seeking) return
   const candidate = aimed >= 0 ? aimed : center
-  if (seeking && candidate === center) return
 
   if (candidate !== focusCandidate) {
     focusCandidate = candidate
@@ -1289,6 +1489,8 @@ const pickIndexAt = (sx: number, sy: number, extraPx: number) => {
     const dx = Math.abs(pickWorld.x - plane.x)
     const dy = Math.abs(pickWorld.y - plane.y)
     if (dx > sw * 0.5 + extra || dy > sh * 0.5 + extra) continue
+    // The centre thumb is drawn on top; a hit inside it wins outright, even if a neighbour is nearer.
+    if (i === center && Number.isFinite(extraPx) && dx <= sw * 0.5 && dy <= sh * 0.5) return i
     const dist = Math.hypot(dx / sw, dy / sh)
     if (dist < bestDist) {
       bestDist = dist
@@ -1305,10 +1507,12 @@ const clearMarkers = () => {
 }
 
 const layout = () => {
+  const live: number[] = []
+  for (let i = 0; i < photos.length && live.length < COUNT; i++) if (photos[i]) live.push(i)
   for (let i = 0; i < COUNT; i++) {
     const node = new THREE.Object3D()
     node.userData.index = i
-    imageIds[i] = i
+    imageIds[i] = live[i] ?? 0
     slotK[i] = i
     const point = slotPoint(i, 0)
     node.position.set(point[0], point[1], point[2])
@@ -1316,12 +1520,17 @@ const layout = () => {
   }
 }
 
+const syncSeedForm = () => {
+  seedForm.hidden = poolCount > 0 || seedBusy
+  document.body.classList.toggle("is-empty", poolCount === 0)
+}
+
 const updateImageUi = () => {
-  const n = photos.length
+  const n = poolCount
   imageCount.textContent = n === 0 ? "No images" : n === 1 ? "1 image" : `${n} images`
-  clearImages.disabled = n === 0 && !folderTree
-  syncTree()
-  syncMeta()
+  clearImages.disabled = n === 0
+  syncSeedForm()
+  syncInfo()
 }
 
 const rebuildPoints = (n: number) => {
@@ -1330,6 +1539,7 @@ const rebuildPoints = (n: number) => {
   velocity.fill(0)
   seek.fill(0)
   behind.length = 0
+  unzoomed.length = 0
   ahead.length = 0
   growth = 0
   zoomVel = 0
@@ -1376,6 +1586,37 @@ const updateSettingLabels = () => {
   paletteFadeVal.textContent = formatFade(settings.paletteFade)
 }
 
+/**
+ * The favicon is the logo mark filled with the current primary colour, on a transparent background.
+ * `public/favicon.svg` is the static default; once the mark is loaded the tab icon follows the theme.
+ */
+const faviconLink = document.querySelector<HTMLLinkElement>('link[rel="icon"]')
+const LOGO_FILL = "#231f20"
+let logoMarkup: string | null = null
+let faviconHex = ""
+let faviconTimer = 0
+
+const syncFavicon = (primaryHex: string) => {
+  if (!faviconLink || !logoMarkup || primaryHex === faviconHex) return
+  faviconHex = primaryHex
+  if (faviconTimer) return
+  // Palette fades call applyTheme every frame; a tab icon only needs to catch up now and then.
+  faviconTimer = window.setTimeout(() => {
+    faviconTimer = 0
+    const svg = logoMarkup!.replaceAll(LOGO_FILL, faviconHex)
+    faviconLink.href = `data:image/svg+xml,${encodeURIComponent(svg)}`
+  }, 300)
+}
+
+void fetch("/logo.svg")
+  .then((res) => (res.ok ? res.text() : null))
+  .then((text) => {
+    if (!text) return
+    logoMarkup = text
+    applyTheme()
+  })
+  .catch(() => undefined)
+
 const applyTheme = () => {
   if (settings.paletteSource === "image" && paletteLive.length) {
     const primary = paletteLive[0]!
@@ -1385,6 +1626,7 @@ const applyTheme = () => {
     themeBg.setRGB(primary[0], primary[1], primary[2])
     renderer.setClearColor(themeBg, 1)
     scene.background = themeBg
+    syncFavicon(rgbToHex(primary))
     return
   }
   const theme = themeColors(settings)
@@ -1393,6 +1635,7 @@ const applyTheme = () => {
   themeBg.set(theme.primary)
   renderer.setClearColor(themeBg, 1)
   scene.background = themeBg
+  syncFavicon(theme.primary)
 }
 
 const syncDither = () => {
@@ -1400,6 +1643,7 @@ const syncDither = () => {
   applyTheme()
   ditherPass.setSettings(settings)
   if (settings.paletteSource === "image" && paletteLive.length) ditherPass.setPaletteRgb(paletteLive)
+  syncSwatches()
 }
 
 const extraColorCap = Math.max(0, MAX_PALETTE - 2)
@@ -1509,7 +1753,7 @@ focusUnditheredCheck.addEventListener("change", () => {
 sphereCountInput.addEventListener("input", () => {
   settings.sphereCount = Math.min(MAX_COUNT, Math.max(MIN_COUNT, Math.round(Number(sphereCountInput.value))))
   updateSettingLabels()
-  if (photos.length) rebuildPoints(Math.min(photos.length, settings.sphereCount))
+  if (poolCount) rebuildPoints(Math.min(poolCount, settings.sphereCount))
 })
 vignetteRadiusInput.addEventListener("input", () => {
   settings.vignetteRadius = Number(vignetteRadiusInput.value)
@@ -1523,6 +1767,34 @@ vignetteStrengthInput.addEventListener("input", () => {
   settings.vignetteStrength = Number(vignetteStrengthInput.value)
   syncDither()
 })
+
+const HOLD_MIN_MS = 500
+const HOLD_MAX_MS = 8000
+
+const syncHoldUi = () => {
+  contextHoldInput.value = String(arenaPrefs.holdMs / 1000)
+  contextHoldVal.textContent = `${(arenaPrefs.holdMs / 1000).toFixed(2).replace(/\.?0+$/, "")}s`
+}
+
+const setHoldMs = (ms: number) => {
+  if (!Number.isFinite(ms)) return
+  arenaPrefs.holdMs = Math.min(HOLD_MAX_MS, Math.max(HOLD_MIN_MS, Math.round(ms)))
+  syncHoldUi()
+}
+
+const syncRevealUi = () => {
+  timerRevealInput.value = String(arenaPrefs.reveal)
+  timerRevealVal.textContent = `${Math.round(arenaPrefs.reveal * 100)}%`
+}
+
+const setReveal = (fraction: number) => {
+  if (!Number.isFinite(fraction)) return
+  arenaPrefs.reveal = Math.min(1, Math.max(0.1, Math.round(fraction * 20) / 20))
+  syncRevealUi()
+}
+
+contextHoldInput.addEventListener("input", () => setHoldMs(Number(contextHoldInput.value) * 1000))
+timerRevealInput.addEventListener("input", () => setReveal(Number(timerRevealInput.value)))
 addColor.addEventListener("click", () => {
   if (settings.colors.length >= extraColorCap) return
   settings.colors.push("#6b8f71")
@@ -1626,12 +1898,17 @@ const applySnapshot = (raw: unknown) => {
       ctrl.value.textContent = formatTweak(sim[field.key], field.step)
     }
   }
+  if (o.arena && typeof o.arena === "object") {
+    const incoming = o.arena as Record<string, unknown>
+    if (typeof incoming.holdMs === "number") setHoldMs(incoming.holdMs)
+    if (typeof incoming.reveal === "number") setReveal(incoming.reveal)
+  }
   lastPaletteKey = ""
   applyImagePalette(true)
   syncPalette()
   syncDither()
-  if (photos.length && typeof o.sphereCount === "number") {
-    rebuildPoints(Math.min(photos.length, settings.sphereCount))
+  if (poolCount && typeof o.sphereCount === "number") {
+    rebuildPoints(Math.min(poolCount, settings.sphereCount))
   }
   return true
 }
@@ -1658,10 +1935,17 @@ pasteSettings.addEventListener("click", async () => {
 })
 
 const resetLibrary = () => {
-  for (const photo of photos) disposePhoto(photo)
+  for (const photo of photos) if (photo) disposePhoto(photo)
   photos.length = 0
+  poolCount = 0
   photoByPath.clear()
   imagePaletteCache.clear()
+  connectionsByBlock.clear()
+  connectionsPending.clear()
+  connectionsFailed.clear()
+  channelPages.clear()
+  context = null
+  hiddenSince.fill(0)
   lastPaletteKey = ""
   paletteLive = []
   paletteTarget = []
@@ -1670,7 +1954,6 @@ const resetLibrary = () => {
   const hadImageColors = settings.imageColors.length > 0
   settings.imageColors = []
   focusedPath = null
-  focusedNode = null
   inspectOpen = false
   inspectPhoto = -1
   inspectSeeded = false
@@ -1755,86 +2038,562 @@ const setLoading = (done: number, total: number) => {
   paintLoading()
 }
 
-const takePhoto = async (file: File, path: string) => {
-  const photo = await photoFromFile(file, path)
-  photoByPath.set(path, photos.length)
+// ── Pool ─────────────────────────────────────────────────────────────────
+/** Upper bound on decoded images kept in memory (~2 MB of GPU memory each at 800 px). */
+const POOL_MAX = 240
+
+const onMarker = (photoIndex: number) => {
+  for (let i = 0; i < COUNT; i++) if (imageIds[i] === photoIndex) return true
+  return false
+}
+
+const evictIfNeeded = () => {
+  if (poolCount <= POOL_MAX) return
+  const candidates: number[] = []
+  for (let i = 0; i < photos.length; i++) {
+    const photo = photos[i]
+    if (!photo || onMarker(i) || photo.path === focusedPath || i === inspectPhoto) continue
+    candidates.push(i)
+  }
+  const score = (i: number) => Math.max(photos[i]!.shownAt, photos[i]!.related)
+  candidates.sort((a, b) => score(a) - score(b))
+  for (const i of candidates.slice(0, poolCount - POOL_MAX)) {
+    const photo = photos[i]!
+    disposePhoto(photo)
+    photoByPath.delete(photo.path)
+    photos[i] = undefined
+    poolCount--
+  }
+}
+
+const pushPhoto = (photo: Photo) => {
+  const index = photos.length
+  photoByPath.set(photo.path, index)
   photos.push(photo)
-  if (COUNT < settings.sphereCount) spawnPoint(photos.length - 1)
+  poolCount++
+  if (COUNT < settings.sphereCount) spawnPoint(index)
   else restockQueues()
+  evictIfNeeded()
+  return index
+}
+
+const firstPhotoPath = () => {
+  for (const photo of photos) if (photo) return photo.path
+  return null
 }
 
 const addFolder = async (files: FolderFile[]) => {
   if (!files.length) return
-  resetLibrary()
-  folderTree = treeFromFiles(files)
-  rebuildPoints(0)
   const images = shuffle(files.filter((item) => isImageFile(item.file, item.path)))
+  if (!images.length) return
+  resetLibrary()
+  rebuildPoints(0)
+  setTarget(null)
   setLoading(0, images.length)
   for (const [i, { file, path }] of images.entries()) {
     try {
-      await takePhoto(file, path)
+      pushPhoto(await photoFromFile(file, path))
     } catch {
       /* skip undecodable files */
     }
     setLoading(i + 1, images.length)
-    imageCount.textContent = `${photos.length} image${photos.length === 1 ? "" : "s"}`
+    imageCount.textContent = `${poolCount} image${poolCount === 1 ? "" : "s"}`
   }
   setLoading(images.length, images.length)
   updateImageUi()
-  setFocusedPath(photos[0]?.path ?? null)
+  setFocusedPath(firstPhotoPath())
 }
 
-const loadDemo = async () => {
-  setLoading(0, -1)
-  const index = await loadDemoIndex()
-  const entries = shuffle(index.filter((entry) => isImagePath(entry.path, entry.type)))
-  if (!entries.length) {
-    setLoading(0, 0)
+// ── Are.na ───────────────────────────────────────────────────────────────
+/** Contents pages are mixed media (roughly half images), so pull generously; still one request. */
+const PAGE_SIZE = 60
+/** Channels this small rarely add anything new; skip them when auto-selecting a source. */
+const MIN_CHANNEL_BLOCKS = 4
+const IMAGE_CONCURRENCY = 4
+/** Pull the next page when fewer than this many unseen photos from the current context remain. */
+const REFILL_BELOW = 16
+const REFILL_GAP_MS = 2500
+const REFILL_RETRY_MS = 8000
+/** A seed may spend up to this many pulls filling the sphere, never dipping below this many free requests. */
+const SEED_MAX_PULLS = 4
+const SEED_KEEP_FREE = 12
+
+let seedBusy = false
+let pulling = false
+let lastPullAt = Number.NEGATIVE_INFINITY
+let lastInteractionAt = 0
+
+/** Any pan or zoom: postpones the context switch and dismisses the first-run hint. */
+const noteInteraction = (now = performance.now()) => {
+  lastInteractionAt = now
+  dismissHint()
+}
+
+/** Pointer over the source list (reading, clicking): the hold timer waits. Keyboard tabbing does not pause it. */
+let listEngaged = false
+contextInfoEl.addEventListener("pointerenter", () => (listEngaged = true))
+contextInfoEl.addEventListener("pointerdown", () => (listEngaged = true))
+contextInfoEl.addEventListener("pointerleave", () => (listEngaged = false))
+contextInfoEl.addEventListener("pointercancel", () => (listEngaged = false))
+
+const setTarget = (target: ArenaTarget | null) => {
+  currentTarget = target
+  const hash = target ? targetToHash(target) : ""
+  if (location.hash !== hash) history.replaceState(null, "", `${location.pathname}${location.search}${hash}`)
+}
+
+/**
+ * Decodes image blocks into the pool. Blocks already cached are only re-stamped.
+ * Returns the pool indices that were added or touched, in order.
+ */
+const addBlocks = async (blocks: ArenaBlock[], via: ArenaChannel | null, contextId: number | null) => {
+  const stamp = performance.now()
+  const touched: number[] = []
+  const fresh: ArenaBlock[] = []
+  const seen = new Set<number>()
+  for (const block of blocks) {
+    if (!isImageBlock(block) || seen.has(block.id)) continue
+    seen.add(block.id)
+    const existing = photoByPath.get(`arena/${block.id}`)
+    if (existing !== undefined && photos[existing]) {
+      if (contextId !== null) {
+        photos[existing]!.related = stamp
+        photos[existing]!.context = contextId
+      }
+      touched.push(existing)
+      continue
+    }
+    fresh.push(block)
+  }
+  let cursor = 0
+  const worker = async () => {
+    while (cursor < fresh.length) {
+      const block = fresh[cursor++]!
+      try {
+        const photo = await photoFromArena(block, via)
+        if (contextId !== null) {
+          photo.related = stamp
+          photo.context = contextId
+        }
+        touched.push(pushPhoto(photo))
+        imageCount.textContent = `${poolCount} image${poolCount === 1 ? "" : "s"}`
+        syncSeedForm()
+      } catch {
+        /* skip undecodable or missing images */
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(IMAGE_CONCURRENCY, fresh.length) }, worker))
+  if (contextId !== null) restockQueues()
+  if (fresh.length) updateImageUi()
+  return touched
+}
+
+const ensureConnections = async (id: number, priority: Priority) => {
+  const cached = connectionsByBlock.get(id)
+  if (cached) return cached
+  connectionsPending.add(id)
+  connectionsFailed.delete(id)
+  syncInfo()
+  try {
+    const page = await arena.blockConnections(id, priority)
+    connectionsByBlock.set(id, page.data)
+    if (context?.id === id) context.channels = page.data
+    return page.data
+  } catch (e) {
+    const kind = e instanceof ArenaError ? e.kind : "offline"
+    connectionsFailed.set(id, kind === "limited" || kind === "budget" ? "waiting" : "unavailable")
+    throw e
+  } finally {
+    connectionsPending.delete(id)
+    syncInfo()
+  }
+}
+
+const pagesFor = (channel: ArenaChannel) => {
+  const entry = channelPages.get(channel.slug) ?? { fetched: new Set<number>(), totalPages: null }
+  channelPages.set(channel.slug, entry)
+  const total = entry.totalPages ?? Math.max(1, Math.ceil(channel.counts.contents / PAGE_SIZE))
+  const open: number[] = []
+  for (let p = 1; p <= total; p++) if (!entry.fetched.has(p)) open.push(p)
+  return { entry, open }
+}
+
+const exhausted = (channel: ArenaChannel) => pagesFor(channel).open.length === 0
+
+/**
+ * The channel currently feeding the pool: the user's pick while it has pages left,
+ * otherwise the next one down the list (wrapping), skipping tiny and exhausted channels.
+ */
+const activeChannel = (): ArenaChannel | null => {
+  const channels = context?.channels
+  if (!channels?.length) return null
+  const start = Math.max(
+    0,
+    channels.findIndex((c) => c.slug === context!.selected),
+  )
+  for (let step = 0; step < channels.length; step++) {
+    const c = channels[(start + step) % channels.length]!
+    if (exhausted(c)) continue
+    if (step > 0 && c.counts.blocks < MIN_CHANNEL_BLOCKS) continue
+    return c
+  }
+  return null
+}
+
+/** Fetches the next unseen page (in channel order) from a channel into the pool. */
+const pullChannel = async (channel: ArenaChannel, priority: Priority, contextId: number | null) => {
+  const { entry, open } = pagesFor(channel)
+  const target = open[0]
+  if (target === undefined) return []
+  const result = await arena.channelContents(channel.slug, target, PAGE_SIZE, priority)
+  entry.fetched.add(target)
+  entry.totalPages = result.meta.total_pages
+  return addBlocks(result.data, channel, contextId)
+}
+
+/** Pulls one page from the active source channel of the current context. */
+const pullNext = async (priority: Priority) => {
+  const ctx = context
+  const channel = activeChannel()
+  if (!ctx || !channel || pulling) return []
+  pulling = true
+  lastPullAt = performance.now()
+  try {
+    const touched = await pullChannel(channel, priority, ctx.id)
+    return touched
+  } finally {
+    pulling = false
+    syncInfo()
+  }
+}
+
+const unseenInContext = () => {
+  const id = context?.id
+  if (id === undefined) return 0
+  let n = 0
+  for (const i of ahead) if (photos[i]?.context === id) n++
+  return n
+}
+
+const setContext = (id: number, title: string, channels: ArenaChannel[] | null) => {
+  context = { id, title, channels, selected: null, setAt: performance.now() }
+  syncInfo()
+}
+
+/** Makes `block` the context and loads its connections (the list scrambles in as it arrives). */
+const adoptContext = async (block: ArenaBlock, priority: Priority) => {
+  setContext(block.id, block.title?.trim() || "untitled", connectionsByBlock.get(block.id) ?? null)
+  const channels = await ensureConnections(block.id, priority)
+  if (context?.id === block.id) context.channels = channels
+  syncInfo()
+}
+
+/**
+ * Runs every frame. Two jobs:
+ *  1. once the user has been still for the hold time, let the context follow the focus;
+ *  2. keep a small buffer of unseen photos from the context so zooming always has material.
+ */
+const stepContext = (now: number) => {
+  if (seedBusy || COUNT === 0) return
+  syncSourceRows(now)
+  const locked = seeking && handedOff && !zooming(now) && !dragging && !inspectOpen
+  const photo = photos[imageIds[center]]
+  const block = photo?.arena
+
+  // A switch is pending when the focus has left the context and the user has moved since it was set.
+  const pending = !!block && context?.id !== block.id && lastInteractionAt > (context?.setAt ?? -1)
+  // Reading or clicking the list holds the timer at full; it resumes once the pointer leaves.
+  if (pending && listEngaged) lastInteractionAt = now
+  const hold = arenaPrefs.holdMs
+  const still = now - lastInteractionAt
+  const hidden = hold * (1 - arenaPrefs.reveal)
+  // The hold only applies to zooming; after a pan the context follows the moment the focus settles.
+  const due = panned ? !listEngaged : still >= hold
+  paintSourceTimer(contextInfoEl, !pending ? 1 : panned ? 0 : 1 - (still - hidden) / Math.max(1, hold - hidden))
+
+  if (pending && locked && due && arena.budget("background") > 0) {
+    panned = false
+    endZoomSession()
+    void adoptContext(block, "background").catch(() => undefined)
+  }
+
+  // Connections failed earlier (budget/offline): retry now and then.
+  if (
+    context &&
+    context.id >= 0 &&
+    !context.channels &&
+    !connectionsPending.has(context.id) &&
+    now - context.setAt >= REFILL_RETRY_MS &&
+    arena.budget("background") > 0
+  ) {
+    context.setAt = now
+    void ensureConnections(context.id, "background").catch(() => undefined)
+  }
+
+  if (!context?.channels || pulling) return
+  if (unseenInContext() >= REFILL_BELOW) return
+  const gap = now - lastPullAt
+  if (gap < REFILL_GAP_MS) return
+  if (arena.budget("background") <= 0) return
+  if (!activeChannel()) return
+  void pullNext("background").catch(() => {
+    lastPullAt = now + REFILL_RETRY_MS - REFILL_GAP_MS
+  })
+}
+
+/** Clicking a channel in the list makes it the source; pulls right away if the buffer is thin. */
+const selectChannel = async (channel: ArenaChannel) => {
+  if (!context || seedBusy) return
+  context.selected = channel.slug
+  syncInfo()
+  if (exhausted(channel)) return
+  if (unseenInContext() >= REFILL_BELOW && activeChannel()?.slug === channel.slug) return
+  try {
+    await pullNext("user")
+  } catch (e) {
+    flashStatus(describeError(e))
+  }
+}
+
+/** Tab moves the source selection down (or up) the list, skipping channels with nothing left. */
+const cycleChannel = (dir: 1 | -1) => {
+  const channels = context?.channels
+  if (!channels?.length || !context) return
+  const listed = channels.slice(0, MAX_SOURCE_ROWS)
+  const current = activeChannel()?.slug ?? null
+  const start = Math.max(0, listed.findIndex((c) => c.slug === current))
+  const usable = (c: ArenaChannel) => !exhausted(c) || (channelStats.get(c.slug)?.unseen ?? 0) > 0
+  for (let step = 1; step <= listed.length; step++) {
+    const c = listed[(start + dir * step + listed.length * step) % listed.length]!
+    if (!usable(c)) continue
+    noteInteraction()
+    void selectChannel(c)
     return
   }
-  resetLibrary()
-  folderTree = treeFromFiles(
-    entries.map((entry) => ({
-      file: new File([], entry.path.split("/").pop() ?? "file", {
-        type: entry.type,
-        lastModified: entry.modified,
-      }),
-      path: entry.path,
-    })),
-  )
-  rebuildPoints(0)
-  setLoading(0, entries.length)
-  const loaded: FolderFile[] = []
-  for (const [i, entry] of entries.entries()) {
-    try {
-      const item = await fetchDemoFile(entry)
-      if (item) {
-        await takePhoto(item.file, item.path)
-        loaded.push(item)
-      }
-    } catch {
-      /* skip missing or undecodable files */
-    }
-    setLoading(i + 1, entries.length)
-    imageCount.textContent = `${photos.length} image${photos.length === 1 ? "" : "s"}`
-  }
-  if (loaded.length) folderTree = treeFromFiles(loaded)
-  setLoading(entries.length, entries.length)
-  updateImageUi()
-  setFocusedPath(photos[0]?.path ?? null)
 }
+
+/** One key press zooms about this many lattice slots (an impulse decays as growth/zoomDamp). */
+const KEY_ZOOM_SLOTS = 8
+
+const isTyping = (target: EventTarget | null) =>
+  target instanceof HTMLElement &&
+  (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.tagName === "SELECT" || target.isContentEditable)
+
+addEventListener("keydown", (event) => {
+  if (event.metaKey || event.ctrlKey || event.altKey || isTyping(event.target)) return
+  if (COUNT === 0 || seedBusy) return
+  const onControl =
+    event.target instanceof HTMLElement &&
+    (event.target.matches("button, a, [role=button]") && !event.target.matches(".info-channel"))
+  switch (event.key) {
+    case "Tab":
+      if (!context?.channels?.length) return
+      event.preventDefault()
+      cycleChannel(event.shiftKey ? -1 : 1)
+      return
+    case "Enter":
+      if (onControl) return
+      event.preventDefault()
+      kickZoom(KEY_ZOOM_SLOTS * sim.zoomDamp)
+      return
+    case "Backspace":
+      if (onControl) return
+      event.preventDefault()
+      kickZoom(-KEY_ZOOM_SLOTS * sim.zoomDamp)
+      return
+    case "Escape":
+      if (inspectOpen) closeInspect()
+      return
+  }
+})
+
+const describeError = (e: unknown) => {
+  if (!(e instanceof ArenaError)) return "something went wrong"
+  switch (e.kind) {
+    case "limited":
+    case "budget": {
+      const secs = Math.ceil((arena.status().retryAt - Date.now()) / 1000)
+      return secs > 0 ? `are.na is cooling down, try again in ${secs}s` : "are.na is cooling down, try again shortly"
+    }
+    case "offline":
+      return "can't reach are.na"
+    case "http":
+      return e.status === 404 ? "couldn't find that on are.na" : `are.na said ${e.status}`
+  }
+}
+
+const seed = async (target: ArenaTarget) => {
+  if (seedBusy) return
+  seedBusy = true
+  seedHint.classList.remove("is-error")
+  seedHint.textContent = "asking are.na…"
+  syncSeedForm()
+  setLoading(0, -1)
+  try {
+    if (target.kind === "block") {
+      const block = await arena.block(target.id, "user")
+      resetLibrary()
+      rebuildPoints(0)
+      setTarget(target)
+      if (isImageBlock(block)) {
+        const [seedIndex] = await addBlocks([block], null, null)
+        if (seedIndex !== undefined) focusPhoto(seedIndex)
+      }
+      try {
+        await adoptContext(block, "user")
+      } catch (e) {
+        if (poolCount === 0) throw e
+      }
+      // Pull down the source list, one page at a time, until the sphere is populated.
+      for (let attempt = 0; attempt < SEED_MAX_PULLS && poolCount < settings.sphereCount; attempt++) {
+        if (!activeChannel()) break
+        try {
+          await pullNext("user")
+        } catch (e) {
+          if (poolCount === 0) throw e
+          break
+        }
+        if (arena.budget("user") <= SEED_KEEP_FREE) break
+      }
+      if (!focusedPath) setFocusedPath(firstPhotoPath())
+    } else {
+      const channel = await arena.channel(target.slug, "user")
+      resetLibrary()
+      rebuildPoints(0)
+      setTarget(target)
+      setContext(-1, channel.title, [channel])
+      await pullNext("user")
+      setFocusedPath(firstPhotoPath())
+    }
+    if (poolCount === 0) {
+      seedHint.classList.add("is-error")
+      seedHint.textContent = "no images reachable from there, try another link"
+    } else {
+      seedHint.textContent = "a block, or a channel"
+      showHint()
+    }
+  } catch (e) {
+    seedHint.classList.add("is-error")
+    seedHint.textContent = describeError(e)
+  } finally {
+    seedBusy = false
+    setLoading(0, 0)
+    updateImageUi()
+  }
+}
+
+// ── First-run hint ───────────────────────────────────────────────────────
+let hintShown = false
+let hintTimer = 0
+
+const showHint = () => {
+  if (hintShown) return
+  hintShown = true
+  renderInstructions(hintEl)
+  hintEl.hidden = false
+  hintEl.classList.remove("is-fading")
+  window.clearTimeout(hintTimer)
+  hintTimer = window.setTimeout(dismissHint, 9000)
+}
+
+const dismissHint = () => {
+  if (hintEl.hidden || hintEl.classList.contains("is-fading")) return
+  hintEl.classList.add("is-fading")
+  window.clearTimeout(hintTimer)
+  hintTimer = window.setTimeout(() => {
+    hintEl.hidden = true
+  }, 1000)
+}
+
+renderInstructions(seedInstructions)
+
+const seedFromText = (text: string) => {
+  const target = parseArenaTarget(text)
+  if (!target) {
+    seedHint.classList.add("is-error")
+    seedHint.textContent = "that doesn't look like an are.na block or channel link"
+    return false
+  }
+  void seed(target)
+  return true
+}
+
+seedForm.addEventListener("submit", (e) => {
+  e.preventDefault()
+  if (seedFromText(seedInput.value)) seedInput.value = ""
+})
+
+sourceForm.addEventListener("submit", (e) => {
+  e.preventDefault()
+  if (seedFromText(sourceInput.value)) sourceInput.value = ""
+})
+
+addEventListener("hashchange", () => {
+  const target = targetFromHash(location.hash)
+  if (!target) return
+  if (!currentTarget || targetToHash(currentTarget) !== targetToHash(target)) void seed(target)
+})
+
+// ── Status indicator ─────────────────────────────────────────────────────
+let statusFlash = ""
+let statusFlashUntil = 0
+let lastStatus: ArenaStatus = arena.status()
+
+const paintStatus = () => {
+  const s = lastStatus
+  const now = Date.now()
+  statusEl.dataset.state = s.state
+  if (statusFlash && now < statusFlashUntil) {
+    statusText.textContent = statusFlash
+    return
+  }
+  statusFlash = ""
+  switch (s.state) {
+    case "idle":
+      statusText.textContent = `are.na  ${s.used}/${s.limit}`
+      break
+    case "fetching":
+      statusText.textContent = `are.na  fetching  ${s.used}/${s.limit}`
+      break
+    case "limited": {
+      const secs = Math.max(1, Math.ceil((s.retryAt - now) / 1000))
+      statusText.textContent = `are.na  cooling down ${secs}s  ·  browsing cache`
+      break
+    }
+    case "offline":
+      statusText.textContent = "are.na  offline  ·  browsing cache"
+      break
+  }
+}
+
+const flashStatus = (text: string, ms = 2600) => {
+  statusFlash = text
+  statusFlashUntil = Date.now() + ms
+  paintStatus()
+}
+
+arena.onStatus((s) => {
+  lastStatus = s
+  paintStatus()
+})
+window.setInterval(() => {
+  lastStatus = arena.status()
+  paintStatus()
+}, 1000)
 
 const clearAllImages = () => {
   resetLibrary()
-  folderTree = null
   rebuildPoints(0)
+  setTarget(null)
+  seedHint.classList.remove("is-error")
+  seedHint.textContent = "a block, or a channel"
 }
 
 fileInput.addEventListener("change", () => {
   void addFolder(filesFromList(fileInput.files ?? []))
   fileInput.value = ""
 })
-addMore.addEventListener("click", () => fileInput.click())
 clearImages.addEventListener("click", clearAllImages)
 
 const prevent = (e: DragEvent) => {
@@ -1855,13 +2614,29 @@ document.addEventListener("drop", (e) => {
   void filesFromDataTransfer(e.dataTransfer).then(addFolder)
 })
 document.addEventListener("paste", (e) => {
-  void addFolder(filesFromList(e.clipboardData?.files ?? []))
+  const files = filesFromList(e.clipboardData?.files ?? [])
+  if (files.length) {
+    void addFolder(files)
+    return
+  }
+  const text = e.clipboardData?.getData("text/plain") ?? ""
+  const target = parseArenaTarget(text)
+  if (!target) return
+  e.preventDefault()
+  if (e.target === seedInput) seedInput.value = ""
+  if (e.target === sourceInput) sourceInput.value = ""
+  void seed(target)
 })
 
 const resize = () => {
   const cssW = innerWidth
   const cssH = innerHeight
-  const side = Math.max(1, Math.min(cssW, cssH))
+  const view = viewPanel.getBoundingClientRect()
+  // On a stacked (phone) layout the sphere shares the screen with the panels above and below it:
+  // shrink it toward the free band, but never below ~78% of the width so thumbs stay legible.
+  const stacked = view.width >= cssW - 1 && view.height < cssH - 1
+  const band = stacked ? Math.max(view.height * 1.1, cssW * 0.78) : Number.POSITIVE_INFINITY
+  const side = Math.max(1, Math.min(cssW, cssH, band))
   const worldPerPx = (2 * FRAME) / side
   camera.left = -cssW * 0.5 * worldPerPx
   camera.right = cssW * 0.5 * worldPerPx
@@ -1870,7 +2645,6 @@ const resize = () => {
   camera.updateProjectionMatrix()
   ditherPass.resize(cssW, cssH)
   diskPx = 1 / worldPerPx
-  const view = viewPanel.getBoundingClientRect()
   const canvasRect = canvas.getBoundingClientRect()
   screenToPlane(view.left + view.width * 0.5 - canvasRect.left, view.top + view.height * 0.5 - canvasRect.top, plane)
   viewRect.x = plane.x
@@ -2116,12 +2890,18 @@ canvas.addEventListener("gestureend", ignoreGesture)
 addEventListener("resize", resize)
 new ResizeObserver(resize).observe(viewPanel)
 
+syncHoldUi()
+syncRevealUi()
 syncPalette()
 syncDither()
 updateImageUi()
 resize()
 lastContentQ.copy(content.quaternion)
-void loadDemo()
+{
+  const initial = targetFromHash(location.hash)
+  if (initial) void seed(initial)
+  else seedInput.focus({ preventScroll: true })
+}
 
 renderer.setAnimationLoop(() => {
   const now = performance.now()
@@ -2169,11 +2949,12 @@ renderer.setAnimationLoop(() => {
 
   stepSpiralPose(dt)
   setSpiral()
-  projectThumbs(dt)
-  if (!(focusedNode && !photoByPath.has(focusedNode.path))) {
+  projectThumbs(dt, now)
+  {
     const photo = COUNT > 0 ? photos[imageIds[center]] : undefined
     setFocusedPath(photo?.path ?? focusedPath)
   }
+  stepContext(now)
   stepImagePalette(dt)
   chrome.step(now, dt)
   present()
