@@ -470,6 +470,36 @@ body {
   opacity: 1;
 }
 
+.seed-examples {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: baseline;
+  gap: 0.2rem 1rem;
+  color: var(--secondary);
+}
+
+.seed-examples-label {
+  opacity: 0.55;
+}
+
+.seed-example {
+  font: inherit;
+  color: var(--secondary);
+  background: none;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  border-bottom: 1px solid color-mix(in srgb, var(--secondary) 35%, transparent);
+  line-height: 20px;
+}
+
+.seed-example:hover,
+.seed-example:focus-visible {
+  border-bottom-color: var(--secondary);
+  outline: none;
+}
+
 /* ── Status + settings toggle ──────────────────────────────── */
 
 .status,

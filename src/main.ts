@@ -549,6 +549,14 @@ const paletteHex = () =>
 
 const copyText = (text: string) => navigator.clipboard.writeText(text).catch(() => undefined)
 
+/** Shareable URL for the focused block; falls back to the seed target, then to the page itself. */
+const focusedLink = () => {
+  const photo = photoAtPath(focusedPath)
+  const target: ArenaTarget | null = photo?.arena ? { kind: "block", id: photo.arena.id } : currentTarget
+  if (!target) return location.href
+  return `${location.origin}${location.pathname}${location.search}${targetToHash(target)}`
+}
+
 const copyColor = (hex: string) => {
   void copyText(hex)
   flashStatus(`copied ${hex}`, 1600)
@@ -592,7 +600,7 @@ const syncInfo = () => {
     state: context ? (context.id >= 0 ? sourceState(context.id) : "ready") : "unavailable",
     poolSize: poolCount,
     onSelect: (channel) => void selectChannel(channel),
-    onCopyLink: () => void copyText(location.href),
+    onCopyLink: () => void copyText(focusedLink()),
     ...sourceRowsView(),
   })
   chrome.invalidate()
@@ -2523,6 +2531,15 @@ seedForm.addEventListener("submit", (e) => {
   e.preventDefault()
   if (seedFromText(seedInput.value)) seedInput.value = ""
 })
+
+for (const example of seedForm.querySelectorAll<HTMLButtonElement>(".seed-example[data-block]")) {
+  const id = Number(example.dataset.block)
+  if (!Number.isFinite(id)) continue
+  example.addEventListener("click", () => {
+    seedInput.value = ""
+    void seed({ kind: "block", id })
+  })
+}
 
 sourceForm.addEventListener("submit", (e) => {
   e.preventDefault()
